@@ -18,13 +18,18 @@ uv run mypy --ignore-missing-imports src/tokenweir tests scripts
 
 ## CLI
 
-Use exactly one task input:
+The canonical invocation takes one positional argument: either inline task
+text, or the path to an existing task file.
 
 ```bash
 uv run tokenweir --help
-uv run tokenweir --task "Add a palindrome checker"
-uv run tokenweir --task-file bench/tasks/palindrome/task.md
+uv run tokenweir "Add a palindrome checker"
+uv run tokenweir bench/tasks/palindrome/task.md
 ```
+
+If the argument names an existing file, its contents are loaded; otherwise it
+is treated as inline task text. The explicit `--task TEXT` and
+`--task-file PATH` forms also work when you want to be unambiguous.
 
 The CLI validates and loads the task, but does not execute it until the build
 loop is implemented.
