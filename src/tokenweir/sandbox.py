@@ -3,8 +3,18 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+
+from tokenweir.paths import resolve_workspace_path
+
+_WORKSPACE_GITIGNORE = """\
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+"""
 
 
 @dataclass
@@ -48,6 +58,9 @@ def init_workspace(
         capture_output=True,
     )
 
+    # Keep check caches out of the generated commits
+    (workspace_dir / ".gitignore").write_text(_WORKSPACE_GITIGNORE, encoding="utf-8")
+
     # Copy grading tests into workspace/tests/
     dest_tests = workspace_dir / "tests"
     if task_tests_dir.exists():
@@ -66,6 +79,20 @@ def init_workspace(
     )
 
 
+def write_files(workspace_dir: Path, files: Iterable[tuple[str, str]]) -> list[Path]:
+    """Write generated files inside the workspace, rejecting unsafe paths."""
+    targets = [
+        (resolve_workspace_path(workspace_dir, relative_path), content)
+        for relative_path, content in files
+    ]
+    written: list[Path] = []
+    for target, content in targets:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        written.append(target)
+    return written
+
+
 def commit_step(workspace_dir: Path, message: str) -> None:
     """Stage and commit all changes after a passing subtask."""
     subprocess.run(["git", "add", "."], cwd=workspace_dir, check=True, capture_output=True)
@@ -77,7 +104,7 @@ def commit_step(workspace_dir: Path, message: str) -> None:
     )
 
 
-def _run_cmd(cmd: list[str], cwd: Path, timeout: int = 30) -> tuple[bool, str]:
+def _run_cmd(cmd: list[str], cwd: Path, timeout: float = 30) -> tuple[bool, str]:
     """Run a command in cwd and return (success, combined_output)."""
     try:
         proc = subprocess.run(

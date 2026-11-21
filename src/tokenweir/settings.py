@@ -7,7 +7,15 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, SecretStr, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 
 class SettingsError(ValueError):
@@ -22,6 +30,7 @@ class ProviderDefinition(BaseModel):
     api_key_env: str | None = None
     base_url_env: str | None = None
     default_base_url: str | None = None
+    timeout_s: int = Field(default=120, ge=1, le=600)
 
     @field_validator("model_env", "api_key_env", "base_url_env")
     @classmethod
@@ -31,10 +40,19 @@ class ProviderDefinition(BaseModel):
         return value
 
 
+class BuilderDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str | None = None
+    max_attempts: int = Field(default=3, ge=1, le=8)
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+
+
 class ProviderRegistry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     providers: list[ProviderDefinition]
+    builder: BuilderDefinition = Field(default_factory=BuilderDefinition)
 
     @field_validator("providers")
     @classmethod
@@ -46,18 +64,34 @@ class ProviderRegistry(BaseModel):
             raise ValueError("provider names must be unique")
         return providers
 
+    @model_validator(mode="after")
+    def validate_builder_provider(self) -> "ProviderRegistry":
+        names = [provider.name for provider in self.providers]
+        if not names:
+            raise ValueError("at least one provider must be defined")
+        if self.builder.provider is None:
+            self.builder.provider = names[0]
+        elif self.builder.provider not in names:
+            raise ValueError(
+                "builder provider must name a configured provider: "
+                + ", ".join(names)
+            )
+        return self
+
 
 class ConfiguredProvider(BaseModel):
     name: str
     model: str
     api_key: SecretStr | None = None
     base_url: str | None = None
+    timeout_s: int = 120
 
 
 class LoadedSettings(BaseModel):
     providers: list[ConfiguredProvider]
     unconfigured: list[str]
     errors: list[str]
+    builder: BuilderDefinition = Field(default_factory=BuilderDefinition)
 
 
 def load_settings(
@@ -103,7 +137,7 @@ def load_settings(
             key = environ.get(definition.api_key_env, "").strip()
             if not key:
                 errors.append(
-                    f"{definition.name}: set {definition.api_key_env} before pinging"
+                    f"{definition.name}: set {definition.api_key_env} before use"
                 )
                 continue
             api_key = SecretStr(key)
@@ -119,7 +153,13 @@ def load_settings(
                 model=model,
                 api_key=api_key,
                 base_url=base_url,
+                timeout_s=definition.timeout_s,
             )
         )
 
-    return LoadedSettings(providers=providers, unconfigured=unconfigured, errors=errors)
+    return LoadedSettings(
+        providers=providers,
+        unconfigured=unconfigured,
+        errors=errors,
+        builder=registry.builder,
+    )

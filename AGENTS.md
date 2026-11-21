@@ -1,8 +1,10 @@
 # TokenWeir contributor guidance
 
-TokenWeir is being built in phases. Keep the current CLI and provider checks
-small; do not imply that task execution, model routing, budget enforcement, or
-resume behavior exists until those phases are implemented and tested.
+TokenWeir is being built in phases. The current implementation executes one
+task through one configured builder model in a disposable workspace. Do not
+imply that architect planning, model routing, quota tracking, budget
+enforcement, or resume behavior exists until those phases are implemented and
+tested.
 
 Protect these product invariants as orchestration is added:
 

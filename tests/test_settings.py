@@ -72,7 +72,7 @@ def test_load_settings_reports_missing_model_and_key(tmp_path: Path) -> None:
     assert settings.unconfigured == [
         "local: set LOCAL_MODEL to a LiteLLM model ID"
     ]
-    assert settings.errors == ["cloud: set CLOUD_KEY before pinging"]
+    assert settings.errors == ["cloud: set CLOUD_KEY before use"]
 
 
 def test_load_settings_rejects_invalid_registry(tmp_path: Path) -> None:
@@ -104,3 +104,101 @@ def test_invalid_registry_error_does_not_echo_secret_values(tmp_path: Path) -> N
         load_settings(registry, environ={})
 
     assert "do-not-print-this" not in str(error.value)
+
+
+def test_load_settings_applies_builder_config_and_timeouts(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "builder": {
+                    "provider": "cloud",
+                    "max_attempts": 5,
+                    "temperature": 0.2,
+                },
+                "providers": [
+                    {
+                        "name": "local",
+                        "model_env": "LOCAL_MODEL",
+                        "timeout_s": 30,
+                    },
+                    {
+                        "name": "cloud",
+                        "model_env": "CLOUD_MODEL",
+                        "api_key_env": "CLOUD_KEY",
+                        "timeout_s": 90,
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(
+        registry,
+        environ={
+            "LOCAL_MODEL": "local/model",
+            "CLOUD_MODEL": "cloud/model",
+            "CLOUD_KEY": "secret-value",
+        },
+    )
+
+    assert settings.builder.provider == "cloud"
+    assert settings.builder.max_attempts == 5
+    assert settings.builder.temperature == 0.2
+    assert [provider.timeout_s for provider in settings.providers] == [30, 90]
+
+
+def test_load_settings_defaults_builder_to_first_provider(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "providers": [
+                    {"name": "local", "model_env": "LOCAL_MODEL"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(registry, environ={"LOCAL_MODEL": "local/model"})
+
+    assert settings.builder.provider == "local"
+    assert settings.builder.max_attempts == 3
+
+
+def test_load_settings_rejects_unknown_builder_provider(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "builder": {"provider": "missing"},
+                "providers": [
+                    {"name": "local", "model_env": "LOCAL_MODEL"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SettingsError, match="builder provider"):
+        load_settings(registry, environ={"LOCAL_MODEL": "local/model"})
+
+
+def test_load_settings_rejects_out_of_range_attempts(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "builder": {"max_attempts": 99},
+                "providers": [
+                    {"name": "local", "model_env": "LOCAL_MODEL"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SettingsError, match="less than or equal to 8"):
+        load_settings(registry, environ={"LOCAL_MODEL": "local/model"})

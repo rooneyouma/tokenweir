@@ -9,13 +9,13 @@ from typing import Sequence
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tokenweir",
-        description="Load a coding task for TokenWeir.",
+        description="Run a coding task with a configured builder model.",
     )
     parser.add_argument(
         "task_source",
         nargs="?",
         metavar="TASK",
-        help="Inline task text, or the path to a Markdown/text task file.",
+        help="Inline task text, a task file, or a directory containing task.md.",
     )
     parser.add_argument(
         "--task",
@@ -28,6 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Path to a Markdown or text file containing the task (explicit form).",
     )
+    parser.add_argument(
+        "--tests",
+        type=Path,
+        metavar="PATH",
+        help="Directory containing grading test_*.py files.",
+    )
     return parser
 
 
@@ -37,6 +43,18 @@ def _read_task_file(task_path: Path) -> str | None:
     except (OSError, UnicodeDecodeError) as exc:
         print(f"tokenweir: cannot read task file {task_path}: {exc}", file=sys.stderr)
         return None
+
+
+def _resolve_tests_dir(
+    explicit: Path | None, task_path: Path | None
+) -> Path | None:
+    if explicit is not None:
+        return explicit
+    if task_path is not None:
+        sibling = task_path.parent / "tests"
+        if sibling.is_dir():
+            return sibling
+    return None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -52,19 +70,35 @@ def main(argv: Sequence[str] | None = None) -> int:
     if len(provided) > 1:
         parser.error("provide only one task source")
 
+    task_path: Path | None = None
     if args.inline_task is not None:
         task = args.inline_task
         source = "inline input"
     elif args.task_file is not None:
-        loaded = _read_task_file(args.task_file)
+        task_path = args.task_file
+        loaded = _read_task_file(task_path)
         if loaded is None:
             return 2
         task = loaded
-        source = str(args.task_file)
+        source = str(task_path)
     else:
         assert args.task_source is not None
         candidate = Path(args.task_source)
-        if candidate.is_file():
+        if candidate.is_dir():
+            task_file = candidate / "task.md"
+            if not task_file.is_file():
+                print(
+                    f"tokenweir: no task.md found in {candidate}", file=sys.stderr
+                )
+                return 2
+            task_path = task_file
+            loaded = _read_task_file(task_file)
+            if loaded is None:
+                return 2
+            task = loaded
+            source = str(task_file)
+        elif candidate.is_file():
+            task_path = candidate
             loaded = _read_task_file(candidate)
             if loaded is None:
                 return 2
@@ -79,6 +113,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("tokenweir: task must not be empty", file=sys.stderr)
         return 2
 
-    print(f"Loaded task from {source} ({len(task)} characters).")
-    print("Task execution is not implemented yet.")
-    return 0
+    tests_dir = _resolve_tests_dir(args.tests, task_path)
+    if tests_dir is None:
+        print(
+            "tokenweir: no grading tests found; pass --tests PATH or place a "
+            "tests/ directory next to the task file",
+            file=sys.stderr,
+        )
+        return 2
+    if not tests_dir.is_dir():
+        print(f"tokenweir: tests path is not a directory: {tests_dir}", file=sys.stderr)
+        return 2
+    if not any(tests_dir.rglob("test_*.py")):
+        print(f"tokenweir: no test_*.py files found in {tests_dir}", file=sys.stderr)
+        return 2
+
+    print(f"Loaded task from {source} ({len(task)} characters).", flush=True)
+
+    from tokenweir.runner import RunnerError, run_task
+
+    try:
+        result = run_task(task, source, tests_dir)
+    except RunnerError as exc:
+        print(f"tokenweir: {exc}", file=sys.stderr)
+        return 2
+
+    return 0 if result.status == "passed" else 1
