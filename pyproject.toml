@@ -1,7 +1,7 @@
 [project]
 name = "tokenweir"
 version = "0.1.0"
-description = "Add your description here"
+description = "A budget-aware, test-driven coding agent orchestration tool"
 readme = "README.md"
 authors = [
     { name = "rooneyouma", email = "oumarooney47@gmail.com" }
@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-tokenweir = "tokenweir:main"
+tokenweir = "tokenweir.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.13.8,<0.14.0"]

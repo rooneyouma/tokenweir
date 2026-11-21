@@ -1,0 +1,25 @@
+{
+  "providers": [
+    {
+      "name": "ollama",
+      "model_env": "TOKENWEIR_OLLAMA_MODEL",
+      "base_url_env": "TOKENWEIR_OLLAMA_BASE_URL",
+      "default_base_url": "http://localhost:11434"
+    },
+    {
+      "name": "deepseek",
+      "model_env": "TOKENWEIR_DEEPSEEK_MODEL",
+      "api_key_env": "DEEPSEEK_API_KEY"
+    },
+    {
+      "name": "gemini",
+      "model_env": "TOKENWEIR_GEMINI_MODEL",
+      "api_key_env": "GEMINI_API_KEY"
+    },
+    {
+      "name": "groq",
+      "model_env": "TOKENWEIR_GROQ_MODEL",
+      "api_key_env": "GROQ_API_KEY"
+    }
+  ]
+}

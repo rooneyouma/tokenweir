@@ -14,12 +14,24 @@ class SandboxResult:
     output: str
 
 
-def init_workspace(workspace_dir: Path, task_tests_dir: Path) -> None:
+def init_workspace(
+    workspace_dir: Path,
+    task_tests_dir: Path,
+    *,
+    workspace_root: Path,
+) -> None:
     """Create a fresh disposable git repo in workspace_dir with task tests copied in."""
-    if workspace_dir.exists():
-        shutil.rmtree(workspace_dir)
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    resolved_root = workspace_root.resolve()
+    resolved_workspace = workspace_dir.resolve()
+    if resolved_workspace == resolved_root or not resolved_workspace.is_relative_to(
+        resolved_root
+    ):
+        raise ValueError(f"Workspace must be a child of the owned root {resolved_root}")
+    if workspace_dir.exists() or workspace_dir.is_symlink():
+        raise FileExistsError(f"Workspace already exists: {workspace_dir}")
 
-    workspace_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True)
 
     # Initialize git and set repo-local identity so commits never fail
     subprocess.run(["git", "init"], cwd=workspace_dir, check=True, capture_output=True)
@@ -39,7 +51,11 @@ def init_workspace(workspace_dir: Path, task_tests_dir: Path) -> None:
     # Copy grading tests into workspace/tests/
     dest_tests = workspace_dir / "tests"
     if task_tests_dir.exists():
-        shutil.copytree(task_tests_dir, dest_tests)
+        shutil.copytree(
+            task_tests_dir,
+            dest_tests,
+            ignore=shutil.ignore_patterns("__pycache__", "*.py[cod]"),
+        )
 
     subprocess.run(["git", "add", "."], cwd=workspace_dir, check=True, capture_output=True)
     subprocess.run(

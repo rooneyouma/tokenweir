@@ -1,2 +1,3 @@
-def main() -> None:
-    print("Hello from tokenweir!")
+from tokenweir.cli import main
+
+__all__ = ["main"]
