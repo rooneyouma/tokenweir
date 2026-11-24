@@ -18,8 +18,7 @@ class UnsafePathError(ValueError):
     """Raised when a generated file path could escape or tamper with the workspace."""
 
 
-def normalize_relative_path(value: str) -> str:
-    """Validate a generated file path and return it in POSIX form."""
+def _normalize(value: str, *, allow_tests: bool) -> str:
     raw = value.strip().replace("\\", "/")
     if not raw:
         raise UnsafePathError("file path must not be empty")
@@ -39,7 +38,7 @@ def normalize_relative_path(value: str) -> str:
     lowered = [part.lower() for part in parts]
     if ".git" in lowered:
         raise UnsafePathError("file path must not modify Git metadata")
-    if lowered[0] == "tests":
+    if lowered[0] == "tests" and not allow_tests:
         raise UnsafePathError("file path must not modify the grading tests")
     if len(parts) == 1 and lowered[0] in _BLOCKED_ROOT_FILES:
         raise UnsafePathError(f"file path must not modify test configuration: {parts[0]}")
@@ -47,9 +46,31 @@ def normalize_relative_path(value: str) -> str:
     return path.as_posix()
 
 
-def resolve_workspace_path(workspace_dir: Path, relative_path: str) -> Path:
+def normalize_relative_path(value: str) -> str:
+    """Validate a generated builder file path and return it in POSIX form."""
+    return _normalize(value, allow_tests=False)
+
+
+def normalize_test_path(value: str) -> str:
+    """Validate an architect-supplied grading test path."""
+    normalized = _normalize(value, allow_tests=True)
+    path = Path(normalized)
+    if not path.parts or path.parts[0] != "tests":
+        raise UnsafePathError("test path must be under tests/")
+    if not path.name.startswith("test_") or path.suffix != ".py":
+        raise UnsafePathError("test path must name a test_*.py file")
+    return normalized
+
+
+def resolve_workspace_path(
+    workspace_dir: Path, relative_path: str, *, allow_tests: bool = False
+) -> Path:
     """Resolve a validated relative path and ensure it stays inside the workspace."""
-    normalized = normalize_relative_path(relative_path)
+    normalized = (
+        normalize_test_path(relative_path)
+        if allow_tests
+        else normalize_relative_path(relative_path)
+    )
     root = workspace_dir.resolve()
     target = (root / normalized).resolve()
     if target == root or not target.is_relative_to(root):

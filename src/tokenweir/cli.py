@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -9,7 +10,7 @@ from typing import Sequence
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tokenweir",
-        description="Run a coding task with a configured builder model.",
+        description="Plan a coding task and build it with a configured builder model.",
     )
     parser.add_argument(
         "task_source",
@@ -32,7 +33,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--tests",
         type=Path,
         metavar="PATH",
-        help="Directory containing grading test_*.py files.",
+        help=(
+            "Directory containing grading test_*.py files; skips architect "
+            "planning and uses direct builder mode."
+        ),
+    )
+    parser.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Ask the architect for a validated plan and print it without building.",
     )
     return parser
 
@@ -113,22 +122,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("tokenweir: task must not be empty", file=sys.stderr)
         return 2
 
-    tests_dir = _resolve_tests_dir(args.tests, task_path)
-    if tests_dir is None:
-        print(
-            "tokenweir: no grading tests found; pass --tests PATH or place a "
-            "tests/ directory next to the task file",
-            file=sys.stderr,
-        )
-        return 2
-    if not tests_dir.is_dir():
-        print(f"tokenweir: tests path is not a directory: {tests_dir}", file=sys.stderr)
-        return 2
-    if not any(tests_dir.rglob("test_*.py")):
-        print(f"tokenweir: no test_*.py files found in {tests_dir}", file=sys.stderr)
-        return 2
-
     print(f"Loaded task from {source} ({len(task)} characters).", flush=True)
+
+    if args.plan_only:
+        from tokenweir.runner import RunnerError, plan_only
+
+        try:
+            plan = plan_only(task)
+        except RunnerError as exc:
+            print(f"tokenweir: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(plan.model_dump(), indent=2))
+        return 0
+
+    tests_dir = _resolve_tests_dir(args.tests, task_path)
+    if tests_dir is not None:
+        if not tests_dir.is_dir():
+            print(
+                f"tokenweir: tests path is not a directory: {tests_dir}",
+                file=sys.stderr,
+            )
+            return 2
+        if not any(tests_dir.rglob("test_*.py")):
+            print(
+                f"tokenweir: no test_*.py files found in {tests_dir}",
+                file=sys.stderr,
+            )
+            return 2
+        print(f"Using supplied grading tests from {tests_dir}.", flush=True)
+    else:
+        print(
+            "No grading tests supplied; asking the architect to plan and "
+            "generate them.",
+            flush=True,
+        )
 
     from tokenweir.runner import RunnerError, run_task
 

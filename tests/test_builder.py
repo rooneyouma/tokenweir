@@ -88,7 +88,7 @@ def test_build_files_sends_expected_request(monkeypatch, capsys) -> None:
         captured.update(kwargs)
         return _response('{"files": [{"path": "solution.py", "content": "x = 1\\n"}]}')
 
-    monkeypatch.setattr("tokenweir.builder.completion", fake_completion)
+    monkeypatch.setattr("tokenweir.llm.completion", fake_completion)
 
     output = build_files("Add a feature", _provider(), prompt="system prompt")
 
@@ -115,7 +115,7 @@ def test_build_files_includes_feedback(monkeypatch) -> None:
         captured.update(kwargs)
         return _response('{"files": [{"path": "solution.py", "content": ""}]}')
 
-    monkeypatch.setattr("tokenweir.builder.completion", fake_completion)
+    monkeypatch.setattr("tokenweir.llm.completion", fake_completion)
 
     build_files(
         "Add a feature",
@@ -136,7 +136,7 @@ def test_build_files_wraps_authentication_error(monkeypatch) -> None:
             model="provider/model",
         )
 
-    monkeypatch.setattr("tokenweir.builder.completion", fail_completion)
+    monkeypatch.setattr("tokenweir.llm.completion", fail_completion)
 
     with pytest.raises(BuilderError, match="authentication failed") as error:
         build_files("Add a feature", _provider(), prompt="system prompt")
@@ -146,7 +146,7 @@ def test_build_files_wraps_authentication_error(monkeypatch) -> None:
 
 def test_build_files_rejects_empty_content(monkeypatch) -> None:
     monkeypatch.setattr(
-        "tokenweir.builder.completion",
+        "tokenweir.llm.completion",
         lambda **kwargs: _response(None),
     )
 
@@ -156,7 +156,7 @@ def test_build_files_rejects_empty_content(monkeypatch) -> None:
 
 def test_build_files_rejects_unexpected_response_shape(monkeypatch) -> None:
     monkeypatch.setattr(
-        "tokenweir.builder.completion",
+        "tokenweir.llm.completion",
         lambda **kwargs: SimpleNamespace(),
     )
 
@@ -168,7 +168,7 @@ def test_build_files_wraps_unexpected_error(monkeypatch) -> None:
     def fail_completion(**kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("tokenweir.builder.completion", fail_completion)
+    monkeypatch.setattr("tokenweir.llm.completion", fail_completion)
 
     with pytest.raises(BuilderError, match="RuntimeError") as error:
         build_files("Add a feature", _provider(), prompt="system prompt")

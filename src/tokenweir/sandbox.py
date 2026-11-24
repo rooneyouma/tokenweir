@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,11 +26,11 @@ class SandboxResult:
 
 def init_workspace(
     workspace_dir: Path,
-    task_tests_dir: Path,
+    task_tests_dir: Path | None,
     *,
     workspace_root: Path,
 ) -> None:
-    """Create a fresh disposable git repo in workspace_dir with task tests copied in."""
+    """Create a fresh disposable git repo, optionally copying in task tests."""
     workspace_root.mkdir(parents=True, exist_ok=True)
     resolved_root = workspace_root.resolve()
     resolved_workspace = workspace_dir.resolve()
@@ -63,7 +63,7 @@ def init_workspace(
 
     # Copy grading tests into workspace/tests/
     dest_tests = workspace_dir / "tests"
-    if task_tests_dir.exists():
+    if task_tests_dir is not None and task_tests_dir.exists():
         shutil.copytree(
             task_tests_dir,
             dest_tests,
@@ -72,17 +72,27 @@ def init_workspace(
 
     subprocess.run(["git", "add", "."], cwd=workspace_dir, check=True, capture_output=True)
     subprocess.run(
-        ["git", "commit", "-m", "Initialize workspace with tests", "--allow-empty"],
+        ["git", "commit", "-m", "Initialize workspace", "--allow-empty"],
         cwd=workspace_dir,
         check=True,
         capture_output=True,
     )
 
 
-def write_files(workspace_dir: Path, files: Iterable[tuple[str, str]]) -> list[Path]:
-    """Write generated files inside the workspace, rejecting unsafe paths."""
+def write_files(
+    workspace_dir: Path,
+    files: Iterable[tuple[str, str]],
+    *,
+    allow_tests: bool = False,
+) -> list[Path]:
+    """Write files inside the workspace, rejecting unsafe paths."""
     targets = [
-        (resolve_workspace_path(workspace_dir, relative_path), content)
+        (
+            resolve_workspace_path(
+                workspace_dir, relative_path, allow_tests=allow_tests
+            ),
+            content,
+        )
         for relative_path, content in files
     ]
     written: list[Path] = []
@@ -120,12 +130,30 @@ def _run_cmd(cmd: list[str], cwd: Path, timeout: float = 30) -> tuple[bool, str]
         return False, f"Command timed out after {timeout}s: {' '.join(cmd)}"
 
 
-def run_checks(workspace_dir: Path) -> SandboxResult:
-    """Run pytest, flake8, and mypy in order inside workspace_dir."""
+def run_checks(
+    workspace_dir: Path,
+    test_paths: Sequence[str] | None = None,
+    lint_paths: Sequence[str] | None = None,
+) -> SandboxResult:
+    """Run pytest, flake8, and mypy in order inside workspace_dir.
+
+    test_paths limits pytest to specific files; None runs the full suite.
+    lint_paths limits flake8/mypy to specific paths; None lints the workspace.
+    """
+    pytest_cmd = [sys.executable, "-m", "pytest", "-q"]
+    if test_paths:
+        pytest_cmd.extend(test_paths)
+    lint_targets = list(lint_paths) if lint_paths else ["."]
     checks = [
-        ("pytest", [sys.executable, "-m", "pytest", "-q"]),
-        ("flake8", [sys.executable, "-m", "flake8", "--max-line-length=100", "."]),
-        ("mypy", [sys.executable, "-m", "mypy", "--ignore-missing-imports", "."]),
+        ("pytest", pytest_cmd),
+        (
+            "flake8",
+            [sys.executable, "-m", "flake8", "--max-line-length=100", *lint_targets],
+        ),
+        (
+            "mypy",
+            [sys.executable, "-m", "mypy", "--ignore-missing-imports", *lint_targets],
+        ),
     ]
 
     for stage, cmd in checks:

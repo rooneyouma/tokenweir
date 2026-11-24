@@ -4,6 +4,9 @@
     "max_attempts": 3,
     "temperature": 0.0
   },
+  "architect": {
+    "temperature": 0.0
+  },
   "providers": [
     {
       "name": "ollama",

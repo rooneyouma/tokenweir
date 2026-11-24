@@ -202,3 +202,75 @@ def test_load_settings_rejects_out_of_range_attempts(tmp_path: Path) -> None:
 
     with pytest.raises(SettingsError, match="less than or equal to 8"):
         load_settings(registry, environ={"LOCAL_MODEL": "local/model"})
+
+
+def test_load_settings_defaults_architect_to_builder_provider(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "builder": {"provider": "cloud"},
+                "providers": [
+                    {"name": "local", "model_env": "LOCAL_MODEL"},
+                    {"name": "cloud", "model_env": "CLOUD_MODEL"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(
+        registry,
+        environ={
+            "LOCAL_MODEL": "local/model",
+            "CLOUD_MODEL": "cloud/model",
+        },
+    )
+
+    assert settings.architect.provider == "cloud"
+    assert settings.architect.temperature == 0.0
+
+
+def test_load_settings_applies_architect_config(tmp_path: Path) -> None:
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "architect": {"provider": "local", "temperature": 0.3},
+                "providers": [
+                    {"name": "local", "model_env": "LOCAL_MODEL"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(
+        registry,
+        environ={"LOCAL_MODEL": "local/model"},
+    )
+
+    assert settings.architect.provider == "local"
+    assert settings.architect.temperature == 0.3
+
+
+def test_load_settings_rejects_unknown_architect_provider(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "architect": {"provider": "missing"},
+                "providers": [
+                    {"name": "local", "model_env": "LOCAL_MODEL"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SettingsError, match="architect provider"):
+        load_settings(registry, environ={"LOCAL_MODEL": "local/model"})

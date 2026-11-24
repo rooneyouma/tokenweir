@@ -48,11 +48,19 @@ class BuilderDefinition(BaseModel):
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
 
 
+class ArchitectDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str | None = None
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+
+
 class ProviderRegistry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     providers: list[ProviderDefinition]
     builder: BuilderDefinition = Field(default_factory=BuilderDefinition)
+    architect: ArchitectDefinition = Field(default_factory=ArchitectDefinition)
 
     @field_validator("providers")
     @classmethod
@@ -65,7 +73,7 @@ class ProviderRegistry(BaseModel):
         return providers
 
     @model_validator(mode="after")
-    def validate_builder_provider(self) -> "ProviderRegistry":
+    def validate_role_providers(self) -> "ProviderRegistry":
         names = [provider.name for provider in self.providers]
         if not names:
             raise ValueError("at least one provider must be defined")
@@ -74,6 +82,13 @@ class ProviderRegistry(BaseModel):
         elif self.builder.provider not in names:
             raise ValueError(
                 "builder provider must name a configured provider: "
+                + ", ".join(names)
+            )
+        if self.architect.provider is None:
+            self.architect.provider = self.builder.provider
+        elif self.architect.provider not in names:
+            raise ValueError(
+                "architect provider must name a configured provider: "
                 + ", ".join(names)
             )
         return self
@@ -92,6 +107,7 @@ class LoadedSettings(BaseModel):
     unconfigured: list[str]
     errors: list[str]
     builder: BuilderDefinition = Field(default_factory=BuilderDefinition)
+    architect: ArchitectDefinition = Field(default_factory=ArchitectDefinition)
 
 
 def load_settings(
@@ -162,4 +178,5 @@ def load_settings(
         unconfigured=unconfigured,
         errors=errors,
         builder=registry.builder,
+        architect=registry.architect,
     )

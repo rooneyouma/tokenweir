@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any
 
-from litellm import completion
-from litellm.exceptions import (
-    APIConnectionError,
-    APIError,
-    AuthenticationError,
-    RateLimitError,
-    Timeout,
-)
 from pydantic import ValidationError
 
+from tokenweir.llm import (
+    JsonObjectError,
+    ModelCallError,
+    ModelResponseError,
+    call_json_model,
+    extract_json_object,
+)
 from tokenweir.schemas import BuilderOutput
 from tokenweir.settings import ConfiguredProvider
 
@@ -39,30 +36,10 @@ def load_builder_prompt() -> str:
 
 def parse_builder_output(raw: str) -> BuilderOutput:
     """Parse JSON from a model response and validate the file contract."""
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-
-    data: Any
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end <= start:
-            raise BuilderResponseError("builder response was not valid JSON") from None
-        try:
-            data = json.loads(text[start:end + 1])
-        except json.JSONDecodeError as exc:
-            raise BuilderResponseError("builder response was not valid JSON") from exc
-
-    if not isinstance(data, dict):
-        raise BuilderResponseError("builder response must be a JSON object")
+        data = extract_json_object(raw)
+    except JsonObjectError as exc:
+        raise BuilderResponseError(f"builder {exc}") from exc
 
     try:
         return BuilderOutput.model_validate(data)
@@ -93,49 +70,17 @@ def build_files(
         )
     user_message += "\nReturn only the JSON object described by the system prompt."
 
-    request: dict[str, Any] = {
-        "model": provider.model,
-        "messages": [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": user_message},
-        ],
-        "response_format": {"type": "json_object"},
-        "temperature": temperature,
-        "timeout": provider.timeout_s,
-        "num_retries": 0,
-        "drop_params": True,
-    }
-    if provider.api_key is not None:
-        request["api_key"] = provider.api_key.get_secret_value()
-    if provider.base_url:
-        request["api_base"] = provider.base_url
-
     try:
-        response = completion(**request)
-    except AuthenticationError as exc:
-        raise BuilderError(
-            "builder authentication failed; verify the configured API key"
-        ) from exc
-    except RateLimitError as exc:
-        raise BuilderError("builder provider rate-limited the request") from exc
-    except Timeout as exc:
-        raise BuilderError("builder call timed out") from exc
-    except APIConnectionError as exc:
-        raise BuilderError("could not connect to the builder provider") from exc
-    except APIError as exc:
-        raise BuilderError(
-            f"builder provider returned an API error ({type(exc).__name__})"
-        ) from exc
-    except Exception as exc:
-        raise BuilderError(f"builder call failed ({type(exc).__name__})") from exc
-
-    try:
-        content = response.choices[0].message.content
-    except (AttributeError, IndexError, TypeError) as exc:
-        raise BuilderResponseError(
-            "builder returned an unexpected response shape"
-        ) from exc
-    if not isinstance(content, str) or not content.strip():
-        raise BuilderResponseError("builder returned an empty response")
+        content = call_json_model(
+            provider,
+            system_prompt=prompt,
+            user_prompt=user_message,
+            temperature=temperature,
+            role="builder",
+        )
+    except ModelResponseError as exc:
+        raise BuilderResponseError(str(exc)) from exc
+    except ModelCallError as exc:
+        raise BuilderError(str(exc)) from exc
 
     return parse_builder_output(content)

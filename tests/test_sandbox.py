@@ -125,6 +125,16 @@ def test_workspace_copy_ignores_python_cache_files(tmp_path: Path) -> None:
     assert not (workspace / "tests" / "__pycache__").exists()
 
 
+def test_init_workspace_without_tests_skips_tests_directory(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+
+    init_workspace(workspace, None, workspace_root=tmp_path)
+
+    assert not (workspace / "tests").exists()
+
+
 def test_write_files_writes_nested_files(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -159,6 +169,62 @@ def test_write_files_rejects_tests_and_git_metadata(tmp_path: Path) -> None:
     for path in ("tests/test_task.py", ".git/config", "conftest.py"):
         with pytest.raises(UnsafePathError):
             write_files(workspace, [(path, "x = 1\n")])
+
+
+def test_write_files_allows_tests_when_requested(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    written = write_files(
+        workspace,
+        [("tests/test_feature.py", "def test_feature(): pass\n")],
+        allow_tests=True,
+    )
+
+    assert written == [(workspace / "tests/test_feature.py").resolve()]
+    assert (workspace / "tests/test_feature.py").exists()
+    with pytest.raises(UnsafePathError):
+        write_files(
+            workspace,
+            [("tests/test_other.py", "def test_other(): pass\n")],
+        )
+
+
+def test_run_checks_can_target_specific_tests_and_lint_paths(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "good.py").write_text(
+        "def answer() -> int:\n    return 42\n", encoding="utf-8"
+    )
+    tests = workspace / "tests"
+    tests.mkdir()
+    (tests / "test_good.py").write_text(
+        "from good import answer\n\n"
+        "def test_answer() -> None:\n"
+        "    assert answer() == 42\n",
+        encoding="utf-8",
+    )
+    (tests / "test_bad.py").write_text(
+        "def test_bad() -> None:\n    assert False\n", encoding="utf-8"
+    )
+
+    passed = run_checks(
+        workspace,
+        test_paths=["tests/test_good.py"],
+        lint_paths=["good.py"],
+    )
+    assert passed.passed is True
+    assert passed.stage == "passed"
+
+    failed = run_checks(
+        workspace,
+        test_paths=["tests/test_bad.py"],
+        lint_paths=["good.py"],
+    )
+    assert failed.passed is False
+    assert failed.stage == "pytest"
 
 
 def test_init_workspace_writes_cache_gitignore(tmp_path: Path) -> None:

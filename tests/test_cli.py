@@ -6,6 +6,7 @@ import pytest
 import tokenweir.runner as runner_module
 from tokenweir.cli import main
 from tokenweir.runner import RunResult
+from tokenweir.schemas import Plan, Subtask, TestFile as GradingTestFile
 
 
 def _make_tests(parent: Path) -> Path:
@@ -26,7 +27,9 @@ def _make_task_dir(parent: Path) -> Path:
 def _fake_run(
     calls: list, status: Literal["passed", "failed"] = "passed"
 ):
-    def fake(task: str, task_source: str, tests_dir: Path) -> RunResult:
+    def fake(
+        task: str, task_source: str, tests_dir: Path | None
+    ) -> RunResult:
         calls.append((task, task_source, tests_dir))
         return RunResult(
             status=status,
@@ -136,9 +139,72 @@ def test_cli_reports_directory_without_task_md(tmp_path: Path, capsys) -> None:
     assert "no task.md found" in capsys.readouterr().err
 
 
-def test_cli_requires_grading_tests(tmp_path: Path, capsys) -> None:
-    assert main(["Add a feature"]) == 2
-    assert "no grading tests found" in capsys.readouterr().err
+def test_cli_uses_architect_mode_without_tests(
+    monkeypatch, capsys
+) -> None:
+    calls: list = []
+    monkeypatch.setattr(runner_module, "run_task", _fake_run(calls))
+
+    assert main(["Add a feature"]) == 0
+
+    assert calls == [("Add a feature", "inline input", None)]
+    out = capsys.readouterr().out
+    assert "asking the architect" in out
+
+
+def test_cli_plan_only_prints_plan(monkeypatch, capsys) -> None:
+    plan = Plan(
+        task="Add a feature",
+        subtasks=[
+            Subtask(
+                id="impl",
+                title="Implement feature",
+                type="function",
+                difficulty="easy",
+                recommended_tier="local_small",
+                files=["feature.py"],
+                spec="Write feature.py.",
+                tests=["tests/test_feature.py"],
+            )
+        ],
+        test_files=[
+            GradingTestFile(
+                path="tests/test_feature.py",
+                content="def test_feature() -> None:\n    assert True\n",
+            )
+        ],
+    )
+    calls: list = []
+
+    def fake_plan(task: str) -> Plan:
+        calls.append(task)
+        return plan
+
+    monkeypatch.setattr(runner_module, "plan_only", fake_plan)
+    monkeypatch.setattr(
+        runner_module,
+        "run_task",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("run_task must not be called in plan-only mode")
+        ),
+    )
+
+    assert main(["Add a feature", "--plan-only"]) == 0
+
+    assert calls == ["Add a feature"]
+    out = capsys.readouterr().out
+    assert '"subtasks"' in out
+    assert '"impl"' in out
+
+
+def test_cli_plan_only_reports_runner_errors(monkeypatch, capsys) -> None:
+    def fail_plan(task: str) -> Plan:
+        raise runner_module.RunnerError("architect failed")
+
+    monkeypatch.setattr(runner_module, "plan_only", fail_plan)
+
+    assert main(["Add a feature", "--plan-only"]) == 2
+    assert "architect failed" in capsys.readouterr().err
 
 
 def test_cli_rejects_empty_tests_directory(tmp_path: Path, capsys) -> None:
