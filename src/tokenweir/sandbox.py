@@ -114,6 +114,22 @@ def commit_step(workspace_dir: Path, message: str) -> None:
     )
 
 
+def reset_workspace(workspace_dir: Path) -> None:
+    """Discard uncommitted changes and untracked files before resuming."""
+    subprocess.run(
+        ["git", "reset", "--hard", "HEAD"],
+        cwd=workspace_dir,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "clean", "-fd"],
+        cwd=workspace_dir,
+        check=True,
+        capture_output=True,
+    )
+
+
 def _run_cmd(cmd: list[str], cwd: Path, timeout: float = 30) -> tuple[bool, str]:
     """Run a command in cwd and return (success, combined_output)."""
     try:

@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 from typing import Literal
@@ -403,3 +404,55 @@ def test_prompt_for_new_cap_returns_none_on_blank(monkeypatch) -> None:
     )
 
     assert _prompt_for_new_cap(exc) is None
+
+
+def test_cli_resumes_record_and_uses_recorded_project(
+    tmp_path: Path, monkeypatch
+) -> None:
+    record_path = tmp_path / "traces" / "old.json"
+    record_path.parent.mkdir()
+    record_path.write_text(
+        json.dumps(
+            {
+                "run_id": "old",
+                "mode": "direct",
+                "status": "paused",
+                "project": "demo",
+                "workspace": str(tmp_path / "workspace" / "old"),
+                "task": "Create impl.py",
+                "task_source": "task.md",
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list = []
+
+    def fake_resume(path: Path, **kwargs) -> RunResult:
+        calls.append((path, kwargs))
+        return RunResult(
+            status="passed",
+            workspace=tmp_path / "workspace" / "old",
+            attempts=1,
+            record_path=record_path,
+        )
+
+    monkeypatch.setattr(runner_module, "resume_run", fake_resume)
+    state_dir = tmp_path / "projects"
+
+    assert (
+        main(
+            [
+                "--resume",
+                str(record_path),
+                "--state-dir",
+                str(state_dir),
+            ]
+        )
+        == 0
+    )
+
+    path, kwargs = calls[0]
+    assert path == record_path
+    assert kwargs["project"] == "demo"
+    assert kwargs["budget_policy"].budget.project == "demo"
+    assert kwargs["use_router"] is True

@@ -6,8 +6,8 @@ architect planning call and a configured builder. In architect mode a
 deterministic router chooses providers for each subtask. It validates the plan
 and returned files, runs pytest, flake8, and mypy, and commits each passing
 subtask. Every model call is recorded in a per-project ledger, and paid calls
-are checked against a project cap before they run. Automatic resume is not
-implemented yet.
+are checked against a project cap before they run. Paused or failed runs can be
+resumed explicitly from their run record; resume is never automatic.
 
 ## Setup
 
@@ -47,6 +47,9 @@ uv run tokenweir --task "Create greet.py with greet(name: str) -> str" \
 
 # Inspect the validated plan without creating a workspace
 uv run tokenweir --task "Create greet.py with greet(name: str) -> str" --plan-only
+
+# Resume a paused or failed run from its preserved workspace
+uv run tokenweir --resume traces/<run-id>.json --cap 3.00
 ```
 
 The positional argument can be inline task text, a task file, or a directory
@@ -70,8 +73,25 @@ Paid calls are checked before they run. When a paid call would exceed the
 project cap, free/local providers remain available. In an interactive terminal
 TokenWeir asks for a new cap and continues if one is supplied. In a
 non-interactive run it pauses, preserves the workspace and trace, and exits with
-code `3`; rerun with `--cap USD` to extend the project. Automatic resume from a
-paused workspace is not implemented yet.
+code `3`; rerun with `--cap USD` to extend the project.
+
+To continue a paused or failed run, pass its record to `--resume`:
+
+```bash
+uv run tokenweir --resume traces/<run-id>.json --cap 3.00
+```
+
+Resume uses the project recorded in the trace unless `--project` is supplied,
+resets the preserved workspace to its last committed subtask, and skips
+subtasks that already passed. A new run record links back with `resumed_from`.
+Run resume from the same working directory as the original run so the recorded
+workspace path resolves. Resume is explicit; a paused run never continues on its
+own.
+
+Provider rate-limit and quota errors are detected at call time. The affected
+provider is skipped for the rest of the run and the router tries the next
+candidate; the architect also falls back to a free provider when planning
+fails. Fixed per-provider request/token quotas are not tracked.
 
 Exit codes: `0` passed, `1` failed after the retry limit, `2` invalid input or
 configuration, `3` paused because the project budget is exhausted.
@@ -112,10 +132,11 @@ DEEPSEEK_API_KEY=...
 ```
 
 The CLI does not choose or override models; the registry and router are the
-source of truth. Per-provider request/token quotas and automatic resume are not
-implemented yet. Small local models can produce valid plans but still fail a
-subtask; the router escalates within the configured bounds, and you can choose a
-stronger configured model if that happens.
+source of truth. Fixed per-provider request/token quotas are not tracked; quota
+and rate-limit errors trigger provider fallback instead. Small local models can
+produce valid plans but still fail a subtask; the router escalates within the
+configured bounds, and you can choose a stronger configured model if that
+happens.
 
 ## Provider health checks
 

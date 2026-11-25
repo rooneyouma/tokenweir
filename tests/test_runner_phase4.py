@@ -5,12 +5,14 @@ from typing import Literal
 import pytest
 
 import tokenweir.runner as runner_module
+from tokenweir.architect import ArchitectProviderUnavailableError
 from tokenweir.budget import (
     BudgetExceededError,
     BudgetPolicy,
     load_project_budget,
 )
-from tokenweir.runner import RunnerError, run_task
+from tokenweir.builder import BuilderProviderUnavailableError
+from tokenweir.runner import RunnerError, resume_run, run_task
 from tokenweir.sandbox import SandboxResult
 from tokenweir.schemas import (
     BuilderFile,
@@ -440,3 +442,289 @@ def test_direct_builder_receives_budget_metadata(
     record = json.loads(result.record_path.read_text(encoding="utf-8"))
     assert record["project"] == "my-project"
     assert record["budget"]["project"] == "phase4"
+
+
+def test_architect_unavailable_falls_back_to_a_free_provider(
+    tmp_path: Path, monkeypatch
+) -> None:
+    settings = LoadedSettings(
+        providers=[
+            _provider("architect-a", "free_cloud"),
+            _provider("local-b"),
+            _provider("builder-a", "free_cloud"),
+        ],
+        unconfigured=[],
+        errors=[],
+        builder=BuilderDefinition(provider="builder-a", max_attempts=3),
+        architect=ArchitectDefinition(provider="architect-a"),
+        router=RouterDefinition(
+            attempts_per_provider=1, max_total_attempts=1
+        ),
+    )
+    seen: list[str] = []
+
+    def fake_plan(task, provider, **kwargs):
+        seen.append(provider.name)
+        if provider.name == "architect-a":
+            raise ArchitectProviderUnavailableError("rate limit exceeded")
+        return _plan()
+
+    monkeypatch.setattr(runner_module, "plan_task", fake_plan)
+    monkeypatch.setattr(
+        runner_module,
+        "build_files",
+        lambda task, provider, **kwargs: _output(),
+    )
+    monkeypatch.setattr(
+        runner_module,
+        "run_checks",
+        lambda *args, **kwargs: SandboxResult(
+            True, "passed", "All checks passed."
+        ),
+    )
+
+    result = run_task(
+        "Create impl.py",
+        "test task",
+        None,
+        workspace_root=tmp_path / "workspace",
+        traces_dir=tmp_path / "traces",
+        settings=settings,
+        use_router=False,
+    )
+
+    assert result.status == "passed"
+    assert seen == ["architect-a", "local-b"]
+    record = json.loads(result.record_path.read_text(encoding="utf-8"))
+    assert record["architect"]["provider"] == "local-b"
+    assert record["architect_fallbacks"] == [
+        {
+            "provider": "architect-a",
+            "kind": "unavailable",
+            "reason": "rate limit exceeded",
+        }
+    ]
+
+
+def test_builder_unavailable_escalates_and_is_recorded(
+    tmp_path: Path, monkeypatch
+) -> None:
+    settings = _settings(
+        [_provider("local-a"), _provider("local-b")],
+        attempts_per_provider=1,
+        max_total_attempts=2,
+    )
+    seen: list[str] = []
+
+    def fake_build(task, provider, **kwargs):
+        seen.append(provider.name)
+        if provider.name == "local-a":
+            raise BuilderProviderUnavailableError("quota exhausted")
+        return _output()
+
+    monkeypatch.setattr(runner_module, "plan_task", lambda *args, **kwargs: _plan())
+    monkeypatch.setattr(runner_module, "build_files", fake_build)
+    monkeypatch.setattr(
+        runner_module,
+        "run_checks",
+        lambda *args, **kwargs: SandboxResult(
+            True, "passed", "All checks passed."
+        ),
+    )
+
+    result = run_task(
+        "Create impl.py",
+        "test task",
+        None,
+        workspace_root=tmp_path / "workspace",
+        traces_dir=tmp_path / "traces",
+        settings=settings,
+        use_router=True,
+    )
+
+    assert result.status == "passed"
+    assert seen == ["local-a", "local-b"]
+    record = json.loads(result.record_path.read_text(encoding="utf-8"))
+    assert record["unavailable_providers"] == ["local-a"]
+    assert record["subtasks"][0]["attempts"][0]["stage"] == "provider"
+
+
+def test_direct_resume_resets_the_workspace_and_continues(
+    tmp_path: Path, monkeypatch
+) -> None:
+    settings = _settings([_provider("local-a")])
+    policy = _policy(tmp_path, cap_usd=0.0)
+    state = {"fail": True}
+
+    def fake_build(task, provider, **kwargs):
+        if state["fail"]:
+            raise BudgetExceededError(
+                project="phase4",
+                cap_usd=0.0,
+                spent_usd=0.0,
+                needed_usd=0.001,
+                reason="paid builder call",
+            )
+        return _output()
+
+    monkeypatch.setattr(runner_module, "build_files", fake_build)
+
+    first = run_task(
+        "Create impl.py",
+        "test task",
+        _tests_dir(tmp_path),
+        workspace_root=tmp_path / "workspace",
+        traces_dir=tmp_path / "traces",
+        settings=settings,
+        project="phase4",
+        budget_policy=policy,
+    )
+    assert first.status == "paused"
+    first_record = json.loads(first.record_path.read_text(encoding="utf-8"))
+
+    state["fail"] = False
+    second = resume_run(
+        first.record_path,
+        workspace_root=tmp_path / "workspace",
+        traces_dir=tmp_path / "traces",
+        settings=settings,
+        project="phase4",
+        budget_policy=_policy(tmp_path, cap_usd=1.0),
+    )
+
+    assert second.status == "passed"
+    assert (second.workspace / "impl.py").exists()
+    record = json.loads(second.record_path.read_text(encoding="utf-8"))
+    assert record["resumed_from"] == first_record["run_id"]
+    assert record["previous_attempts"] == 1
+    assert record["new_attempts"] == 1
+    assert record["total_attempts"] == 2
+
+
+def _two_subtask_plan() -> Plan:
+    return Plan(
+        task="Create a.py and b.py",
+        subtasks=[
+            Subtask(
+                id="one",
+                title="Create a",
+                type="function",
+                difficulty="easy",
+                recommended_tier="local_small",
+                files=["a.py"],
+                spec="Create a in a.py.",
+                tests=["tests/test_a.py"],
+            ),
+            Subtask(
+                id="two",
+                title="Create b",
+                type="function",
+                difficulty="easy",
+                recommended_tier="local_small",
+                files=["b.py"],
+                spec="Create b in b.py.",
+                tests=["tests/test_b.py"],
+                depends_on=["one"],
+            ),
+        ],
+        test_files=[
+            GradingTestFile(
+                path="tests/test_a.py",
+                content="def test_a() -> None:\n    assert True\n",
+            ),
+            GradingTestFile(
+                path="tests/test_b.py",
+                content="def test_b() -> None:\n    assert True\n",
+            ),
+        ],
+    )
+
+
+def test_architect_resume_skips_completed_subtasks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    settings = _settings([_provider("local-a")])
+    policy = _policy(tmp_path, cap_usd=0.0)
+    state = {"fail_second": True}
+
+    def fake_build(task, provider, **kwargs):
+        subtask = kwargs.get("subtask")
+        if subtask == "two" and state["fail_second"]:
+            raise BudgetExceededError(
+                project="phase4",
+                cap_usd=0.0,
+                spent_usd=0.0,
+                needed_usd=0.001,
+                reason="paid builder call",
+            )
+        if subtask == "one":
+            return BuilderOutput(
+                files=[
+                    BuilderFile(
+                        path="a.py",
+                        content="def a() -> int:\n    return 1\n",
+                    )
+                ]
+            )
+        return BuilderOutput(
+            files=[
+                BuilderFile(
+                    path="b.py",
+                    content="def b() -> int:\n    return 2\n",
+                )
+            ]
+        )
+
+    monkeypatch.setattr(
+        runner_module, "plan_task", lambda *args, **kwargs: _two_subtask_plan()
+    )
+    monkeypatch.setattr(runner_module, "build_files", fake_build)
+    monkeypatch.setattr(
+        runner_module,
+        "run_checks",
+        lambda *args, **kwargs: SandboxResult(
+            True, "passed", "All checks passed."
+        ),
+    )
+
+    first = run_task(
+        "Create a.py and b.py",
+        "test task",
+        None,
+        workspace_root=tmp_path / "workspace",
+        traces_dir=tmp_path / "traces",
+        settings=settings,
+        project="phase4",
+        budget_policy=policy,
+        use_router=False,
+    )
+    assert first.status == "paused"
+    first_record = json.loads(first.record_path.read_text(encoding="utf-8"))
+    assert [item["status"] for item in first_record["subtasks"]] == [
+        "passed",
+        "paused",
+    ]
+
+    state["fail_second"] = False
+    second = resume_run(
+        first.record_path,
+        workspace_root=tmp_path / "workspace",
+        traces_dir=tmp_path / "traces",
+        settings=settings,
+        project="phase4",
+        budget_policy=_policy(tmp_path, cap_usd=1.0),
+        use_router=False,
+    )
+
+    assert second.status == "passed"
+    assert (second.workspace / "a.py").exists()
+    assert (second.workspace / "b.py").exists()
+    record = json.loads(second.record_path.read_text(encoding="utf-8"))
+    assert record["resumed_from"] == first_record["run_id"]
+    assert record["previous_attempts"] == 2
+    assert record["new_attempts"] == 1
+    assert record["total_attempts"] == 3
+    assert [item["status"] for item in record["subtasks"]] == [
+        "passed",
+        "passed",
+    ]

@@ -27,6 +27,10 @@ class ModelCallError(RuntimeError):
     """Raised when a model call cannot produce usable content."""
 
 
+class ModelProviderUnavailableError(ModelCallError):
+    """Raised when a provider reports a rate limit or exhausted quota."""
+
+
 class ModelResponseError(ModelCallError):
     """Raised when a provider response has no usable content."""
 
@@ -201,6 +205,23 @@ def _actual_cost(
     return 0.0, False
 
 
+_UNAVAILABLE_MARKERS = (
+    "quota",
+    "rate limit",
+    "rate_limit",
+    "rate-limit",
+    "insufficient",
+    "exhausted",
+    "billing",
+    "too many requests",
+)
+
+
+def _is_provider_unavailable(exc: Exception) -> bool:
+    message = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in message for marker in _UNAVAILABLE_MARKERS)
+
+
 def _record_call(
     budget_policy: BudgetPolicy | None,
     provider: ConfiguredProvider,
@@ -280,12 +301,18 @@ def call_json_model(
             f"{role} authentication failed; verify the configured API key"
         ) from exc
     except RateLimitError as exc:
-        raise ModelCallError(f"{role} provider rate-limited the request") from exc
+        raise ModelProviderUnavailableError(
+            f"{role} provider rate-limited the request"
+        ) from exc
     except Timeout as exc:
         raise ModelCallError(f"{role} call timed out") from exc
     except APIConnectionError as exc:
         raise ModelCallError(f"could not connect to the {role} provider") from exc
     except APIError as exc:
+        if _is_provider_unavailable(exc):
+            raise ModelProviderUnavailableError(
+                f"{role} provider exhausted its quota or rate limit"
+            ) from exc
         raise ModelCallError(
             f"{role} provider returned an API error ({type(exc).__name__})"
         ) from exc

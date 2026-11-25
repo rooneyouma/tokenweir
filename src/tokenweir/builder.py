@@ -8,6 +8,7 @@ from tokenweir.budget import BudgetPolicy
 from tokenweir.llm import (
     JsonObjectError,
     ModelCallError,
+    ModelProviderUnavailableError,
     ModelResponseError,
     call_json_model,
     extract_json_object,
@@ -22,6 +23,10 @@ class BuilderError(RuntimeError):
 
 class BuilderResponseError(BuilderError):
     """Raised when the builder response is malformed or violates the contract."""
+
+
+class BuilderProviderUnavailableError(BuilderError):
+    """Raised when the builder provider is rate-limited or out of quota."""
 
 
 def load_builder_prompt() -> str:
@@ -90,6 +95,8 @@ def build_files(
         )
     except ModelResponseError as exc:
         raise BuilderResponseError(str(exc)) from exc
+    except ModelProviderUnavailableError as exc:
+        raise BuilderProviderUnavailableError(str(exc)) from exc
     except ModelCallError as exc:
         raise BuilderError(str(exc)) from exc
 

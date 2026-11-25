@@ -4,8 +4,9 @@ TokenWeir is being built in phases. The current implementation runs one task in
 a disposable workspace either directly with supplied tests or through one
 architect planning call plus a configured builder. Architect mode uses a
 deterministic router, and paid calls are enforced against a per-project cap and
-recorded in a JSONL ledger. Do not imply that per-provider quota tracking or
-automatic resume exists until those phases are implemented and tested.
+recorded in a JSONL ledger. Provider rate-limit and quota errors trigger
+fallback, and paused or failed runs can be resumed explicitly with `--resume`.
+Do not imply fixed per-provider quota tracking or automatic resume exists.
 
 Protect these product invariants as orchestration is added:
 

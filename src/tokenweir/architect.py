@@ -8,6 +8,7 @@ from tokenweir.budget import BudgetPolicy
 from tokenweir.llm import (
     JsonObjectError,
     ModelCallError,
+    ModelProviderUnavailableError,
     ModelResponseError,
     call_json_model,
     extract_json_object,
@@ -22,6 +23,10 @@ class ArchitectError(RuntimeError):
 
 class ArchitectResponseError(ArchitectError):
     """Raised when the architect response is malformed or violates the plan contract."""
+
+
+class ArchitectProviderUnavailableError(ArchitectError):
+    """Raised when the architect provider is rate-limited or out of quota."""
 
 
 def _read_prompt_file(path: Path, label: str) -> str:
@@ -94,6 +99,8 @@ def plan_task(
         )
     except ModelResponseError as exc:
         raise ArchitectResponseError(str(exc)) from exc
+    except ModelProviderUnavailableError as exc:
+        raise ArchitectProviderUnavailableError(str(exc)) from exc
     except ModelCallError as exc:
         raise ArchitectError(str(exc)) from exc
 

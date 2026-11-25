@@ -76,6 +76,15 @@ def build_parser() -> argparse.ArgumentParser:
             "instead of the deterministic router."
         ),
     )
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        metavar="RUN",
+        help=(
+            "Resume a paused or failed run from its JSON run record, "
+            "for example traces/<run_id>.json."
+        ),
+    )
     return parser
 
 
@@ -142,13 +151,15 @@ def _print_budget(policy: "BudgetPolicy") -> None:
 
 
 def _load_budget_policy(
-    args: argparse.Namespace, loaded: "LoadedSettings"
+    args: argparse.Namespace,
+    loaded: "LoadedSettings",
+    project: str | None = None,
 ) -> "BudgetPolicy":
     from tokenweir.budget import BudgetPolicy, load_project_budget
 
     state_dir = args.state_dir or Path(loaded.budget.state_dir)
     budget = load_project_budget(
-        args.project,
+        project or args.project,
         state_dir=state_dir,
         cap_usd=args.cap,
         default_cap_usd=loaded.budget.default_cap_usd,
@@ -213,9 +224,73 @@ def _resolve_task(args: argparse.Namespace) -> tuple[str, str, Path | None] | No
     return task, source, task_path
 
 
+def _resume(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    from tokenweir.budget import BudgetError, BudgetExceededError
+    from tokenweir.runner import RunnerError, load_run_record, resume_run
+    from tokenweir.settings import SettingsError, load_settings
+
+    try:
+        loaded = load_settings()
+    except SettingsError as exc:
+        print(f"tokenweir: {exc}", file=sys.stderr)
+        return 2
+    try:
+        previous = load_run_record(args.resume)
+    except RunnerError as exc:
+        print(f"tokenweir: {exc}", file=sys.stderr)
+        return 2
+    project = args.project
+    if project == parser.get_default("project"):
+        recorded_project = previous.get("project")
+        if isinstance(recorded_project, str) and recorded_project:
+            project = recorded_project
+    try:
+        policy = _load_budget_policy(args, loaded, project=project)
+    except BudgetError as exc:
+        print(f"tokenweir: {exc}", file=sys.stderr)
+        return 2
+    _print_budget(policy)
+    try:
+        result = resume_run(
+            args.resume,
+            settings=loaded,
+            project=project,
+            budget_policy=policy,
+            use_router=not args.no_router,
+        )
+    except BudgetExceededError as exc:
+        print(f"tokenweir: {exc}", file=sys.stderr)
+        return 3
+    except BudgetError as exc:
+        print(f"tokenweir: {exc}", file=sys.stderr)
+        return 2
+    except RunnerError as exc:
+        print(f"tokenweir: {exc}", file=sys.stderr)
+        return 2
+    if result.status == "passed":
+        return 0
+    if result.status == "paused":
+        return 3
+    return 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.resume is not None:
+        if any(
+            value is not None
+            for value in (
+                args.task_source,
+                args.inline_task,
+                args.task_file,
+                args.tests,
+            )
+        ) or args.plan_only:
+            parser.error(
+                "--resume cannot be combined with a task, --tests, or --plan-only"
+            )
+        return _resume(args, parser)
     try:
         resolved = _resolve_task(args)
     except ValueError as exc:
