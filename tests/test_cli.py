@@ -1,10 +1,12 @@
+import sys
 from pathlib import Path
 from typing import Literal
 
 import pytest
 
 import tokenweir.runner as runner_module
-from tokenweir.cli import main
+from tokenweir.budget import BudgetExceededError
+from tokenweir.cli import _prompt_for_new_cap, main
 from tokenweir.runner import RunResult
 from tokenweir.schemas import Plan, Subtask, TestFile as GradingTestFile
 
@@ -25,12 +27,19 @@ def _make_task_dir(parent: Path) -> Path:
 
 
 def _fake_run(
-    calls: list, status: Literal["passed", "failed"] = "passed"
+    calls: list,
+    status: Literal["passed", "failed", "paused"] = "passed",
+    kwargs_calls: list | None = None,
 ):
     def fake(
-        task: str, task_source: str, tests_dir: Path | None
+        task: str,
+        task_source: str,
+        tests_dir: Path | None,
+        **kwargs,
     ) -> RunResult:
         calls.append((task, task_source, tests_dir))
+        if kwargs_calls is not None:
+            kwargs_calls.append(kwargs)
         return RunResult(
             status=status,
             workspace=Path("workspace/run"),
@@ -176,7 +185,7 @@ def test_cli_plan_only_prints_plan(monkeypatch, capsys) -> None:
     )
     calls: list = []
 
-    def fake_plan(task: str) -> Plan:
+    def fake_plan(task: str, **kwargs) -> Plan:
         calls.append(task)
         return plan
 
@@ -198,7 +207,7 @@ def test_cli_plan_only_prints_plan(monkeypatch, capsys) -> None:
 
 
 def test_cli_plan_only_reports_runner_errors(monkeypatch, capsys) -> None:
-    def fail_plan(task: str) -> Plan:
+    def fail_plan(task: str, **kwargs) -> Plan:
         raise runner_module.RunnerError("architect failed")
 
     monkeypatch.setattr(runner_module, "plan_only", fail_plan)
@@ -246,3 +255,151 @@ def test_cli_reports_runner_errors(
 
     assert main(["Add a feature", "--tests", str(tests)]) == 2
     assert "builder provider is not configured" in capsys.readouterr().err
+
+
+def test_cli_passes_project_and_cap_to_runner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    tests = _make_tests(tmp_path)
+    calls: list = []
+    kwargs_calls: list = []
+    monkeypatch.setattr(
+        runner_module,
+        "run_task",
+        _fake_run(calls, kwargs_calls=kwargs_calls),
+    )
+    state_dir = tmp_path / "projects"
+
+    assert (
+        main(
+            [
+                "Add a feature",
+                "--tests",
+                str(tests),
+                "--project",
+                "demo",
+                "--cap",
+                "3.5",
+                "--state-dir",
+                str(state_dir),
+            ]
+        )
+        == 0
+    )
+
+    assert calls == [("Add a feature", "inline input", tests)]
+    kwargs = kwargs_calls[0]
+    assert kwargs["project"] == "demo"
+    assert kwargs["use_router"] is True
+    assert kwargs["budget_policy"].budget.project == "demo"
+    assert kwargs["budget_policy"].budget.cap_usd == 3.5
+    assert (state_dir / "demo" / "budget.json").exists()
+
+
+def test_cli_can_disable_the_router(
+    tmp_path: Path, monkeypatch
+) -> None:
+    tests = _make_tests(tmp_path)
+    kwargs_calls: list = []
+    monkeypatch.setattr(
+        runner_module,
+        "run_task",
+        _fake_run([], kwargs_calls=kwargs_calls),
+    )
+
+    assert main(["Add a feature", "--tests", str(tests), "--no-router"]) == 0
+
+    assert kwargs_calls[0]["use_router"] is False
+
+
+def test_cli_prints_budget_status(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    tests = _make_tests(tmp_path)
+    monkeypatch.setattr(runner_module, "run_task", _fake_run([]))
+
+    assert main(["Add a feature", "--tests", str(tests)]) == 0
+
+    out = capsys.readouterr().out
+    assert "Budget: project 'default' cap $2.00" in out
+
+
+def test_cli_returns_three_when_run_pauses(
+    tmp_path: Path, monkeypatch
+) -> None:
+    tests = _make_tests(tmp_path)
+    monkeypatch.setattr(
+        runner_module, "run_task", _fake_run([], status="paused")
+    )
+
+    assert main(["Add a feature", "--tests", str(tests)]) == 3
+
+
+def test_cli_returns_three_when_plan_budget_is_exceeded(
+    monkeypatch, capsys
+) -> None:
+    def fail_plan(task: str, **kwargs) -> Plan:
+        raise BudgetExceededError(
+            project="default",
+            cap_usd=0.0,
+            spent_usd=0.0,
+            needed_usd=0.001,
+        )
+
+    monkeypatch.setattr(runner_module, "plan_only", fail_plan)
+
+    assert main(["Add a feature", "--plan-only"]) == 3
+    assert "cap" in capsys.readouterr().err
+
+
+def test_cli_rejects_negative_cap(tmp_path: Path, capsys) -> None:
+    tests = _make_tests(tmp_path)
+
+    assert main(["Add a feature", "--tests", str(tests), "--cap", "-1"]) == 2
+    assert "finite non-negative" in capsys.readouterr().err
+
+
+def test_prompt_for_new_cap_returns_none_without_a_tty(
+    monkeypatch, capsys
+) -> None:
+    class FakeStdin:
+        def isatty(self) -> bool:
+            return False
+
+    monkeypatch.setattr(sys, "stdin", FakeStdin())
+    exc = BudgetExceededError(
+        project="demo", cap_usd=1.0, spent_usd=1.0
+    )
+
+    assert _prompt_for_new_cap(exc) is None
+    err = capsys.readouterr().err
+    assert "rerun with --cap" in err
+
+
+def test_prompt_for_new_cap_retries_until_valid(monkeypatch) -> None:
+    class FakeStdin:
+        def isatty(self) -> bool:
+            return True
+
+    answers = iter(["not-a-number", "0.5", "2"])
+    monkeypatch.setattr(sys, "stdin", FakeStdin())
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    exc = BudgetExceededError(
+        project="demo", cap_usd=1.0, spent_usd=1.0
+    )
+
+    assert _prompt_for_new_cap(exc) == 2.0
+
+
+def test_prompt_for_new_cap_returns_none_on_blank(monkeypatch) -> None:
+    class FakeStdin:
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(sys, "stdin", FakeStdin())
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    exc = BudgetExceededError(
+        project="demo", cap_usd=1.0, spent_usd=1.0
+    )
+
+    assert _prompt_for_new_cap(exc) is None

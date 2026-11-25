@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from tokenweir.budget import BudgetPolicy
 from tokenweir.llm import (
     JsonObjectError,
     ModelCallError,
@@ -60,6 +61,10 @@ def build_files(
     prompt: str,
     feedback: str | None = None,
     temperature: float = 0.0,
+    budget_policy: BudgetPolicy | None = None,
+    subtask: str | None = None,
+    attempt: int = 1,
+    run_id: str = "",
 ) -> BuilderOutput:
     """Ask one configured model for a complete set of files."""
     user_message = f"Task:\n{task}\n"
@@ -71,16 +76,21 @@ def build_files(
     user_message += "\nReturn only the JSON object described by the system prompt."
 
     try:
-        content = call_json_model(
+        result = call_json_model(
             provider,
             system_prompt=prompt,
             user_prompt=user_message,
             temperature=temperature,
             role="builder",
+            budget_policy=budget_policy,
+            task=task,
+            subtask=subtask,
+            attempt=attempt,
+            run_id=run_id,
         )
     except ModelResponseError as exc:
         raise BuilderResponseError(str(exc)) from exc
     except ModelCallError as exc:
         raise BuilderError(str(exc)) from exc
 
-    return parse_builder_output(content)
+    return parse_builder_output(result.content)

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from tokenweir.budget import BudgetPolicy
 from tokenweir.llm import (
     JsonObjectError,
     ModelCallError,
@@ -70,6 +71,8 @@ def plan_task(
     prompt: str,
     brief: str,
     temperature: float = 0.0,
+    budget_policy: BudgetPolicy | None = None,
+    run_id: str = "",
 ) -> Plan:
     """Make exactly one planning call and return a validated plan."""
     user_message = (
@@ -78,16 +81,20 @@ def plan_task(
         "Return only the JSON plan described by the system prompt."
     )
     try:
-        content = call_json_model(
+        result = call_json_model(
             provider,
             system_prompt=prompt,
             user_prompt=user_message,
             temperature=temperature,
             role="architect",
+            budget_policy=budget_policy,
+            task=task,
+            attempt=1,
+            run_id=run_id,
         )
     except ModelResponseError as exc:
         raise ArchitectResponseError(str(exc)) from exc
     except ModelCallError as exc:
         raise ArchitectError(str(exc)) from exc
 
-    return parse_plan(content)
+    return parse_plan(result.content)

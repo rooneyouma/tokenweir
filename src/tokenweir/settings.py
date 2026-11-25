@@ -5,6 +5,7 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 from pydantic import (
@@ -31,6 +32,11 @@ class ProviderDefinition(BaseModel):
     base_url_env: str | None = None
     default_base_url: str | None = None
     timeout_s: int = Field(default=120, ge=1, le=600)
+    free: bool = False
+    tier: Literal["local", "free_cloud", "paid"] = "paid"
+    max_output_tokens: int = Field(default=4096, ge=1, le=131072)
+    input_cost_per_million: float | None = Field(default=None, ge=0.0)
+    output_cost_per_million: float | None = Field(default=None, ge=0.0)
 
     @field_validator("model_env", "api_key_env", "base_url_env")
     @classmethod
@@ -38,6 +44,17 @@ class ProviderDefinition(BaseModel):
         if value is not None and re.fullmatch(r"[A-Z][A-Z0-9_]*", value) is None:
             raise ValueError("environment variable names must use uppercase letters")
         return value
+
+    @model_validator(mode="after")
+    def validate_cost_pair(self) -> "ProviderDefinition":
+        if (
+            self.input_cost_per_million is None
+        ) != (self.output_cost_per_million is None):
+            raise ValueError(
+                "set both input_cost_per_million and output_cost_per_million "
+                "or neither"
+            )
+        return self
 
 
 class BuilderDefinition(BaseModel):
@@ -55,12 +72,29 @@ class ArchitectDefinition(BaseModel):
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
 
 
+class RouterDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attempts_per_provider: int = Field(default=2, ge=1, le=5)
+    max_total_attempts: int = Field(default=6, ge=1, le=20)
+
+
+class BudgetDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    default_cap_usd: float = Field(default=2.0, ge=0.0)
+    warn_fraction: float = Field(default=0.8, ge=0.0, le=1.0)
+    state_dir: str = "projects"
+
+
 class ProviderRegistry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     providers: list[ProviderDefinition]
     builder: BuilderDefinition = Field(default_factory=BuilderDefinition)
     architect: ArchitectDefinition = Field(default_factory=ArchitectDefinition)
+    router: RouterDefinition = Field(default_factory=RouterDefinition)
+    budget: BudgetDefinition = Field(default_factory=BudgetDefinition)
 
     @field_validator("providers")
     @classmethod
@@ -100,6 +134,11 @@ class ConfiguredProvider(BaseModel):
     api_key: SecretStr | None = None
     base_url: str | None = None
     timeout_s: int = 120
+    free: bool = False
+    tier: Literal["local", "free_cloud", "paid"] = "paid"
+    max_output_tokens: int = 4096
+    input_cost_per_million: float | None = None
+    output_cost_per_million: float | None = None
 
 
 class LoadedSettings(BaseModel):
@@ -108,6 +147,8 @@ class LoadedSettings(BaseModel):
     errors: list[str]
     builder: BuilderDefinition = Field(default_factory=BuilderDefinition)
     architect: ArchitectDefinition = Field(default_factory=ArchitectDefinition)
+    router: RouterDefinition = Field(default_factory=RouterDefinition)
+    budget: BudgetDefinition = Field(default_factory=BudgetDefinition)
 
 
 def load_settings(
@@ -170,6 +211,11 @@ def load_settings(
                 api_key=api_key,
                 base_url=base_url,
                 timeout_s=definition.timeout_s,
+                free=definition.free,
+                tier=definition.tier,
+                max_output_tokens=definition.max_output_tokens,
+                input_cost_per_million=definition.input_cost_per_million,
+                output_cost_per_million=definition.output_cost_per_million,
             )
         )
 
@@ -179,4 +225,6 @@ def load_settings(
         errors=errors,
         builder=registry.builder,
         architect=registry.architect,
+        router=registry.router,
+        budget=registry.budget,
     )

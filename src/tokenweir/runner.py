@@ -14,12 +14,15 @@ from tokenweir.architect import (
     load_project_brief,
     plan_task,
 )
+from tokenweir.budget import BudgetError, BudgetExceededError, BudgetPolicy
 from tokenweir.builder import (
     BuilderError,
     BuilderResponseError,
     build_files,
     load_builder_prompt,
 )
+from tokenweir.router import RoutingError
+from tokenweir.router import candidates as route_candidates
 from tokenweir.sandbox import commit_step, init_workspace, run_checks, write_files
 from tokenweir.schemas import BuilderOutput, Plan, Subtask
 from tokenweir.settings import (
@@ -36,7 +39,7 @@ class RunnerError(RuntimeError):
 
 @dataclass
 class RunResult:
-    status: Literal["passed", "failed"]
+    status: Literal["passed", "failed", "paused"]
     workspace: Path
     attempts: int
     record_path: Path
@@ -47,6 +50,9 @@ class BuildStepResult:
     passed: bool
     attempts: list[dict[str, Any]]
     written: list[Path]
+    paused: bool = False
+    provider: ConfiguredProvider | None = None
+    budget_error: BudgetExceededError | None = None
 
 
 def _select_provider(
@@ -91,14 +97,23 @@ def _task_title(task: str) -> str:
 
 
 def _attempt(
-    number: int, stage: str, passed: bool, output: str
+    number: int,
+    stage: str,
+    passed: bool,
+    output: str,
+    *,
+    provider: ConfiguredProvider | None = None,
 ) -> dict[str, Any]:
-    return {
+    data: dict[str, Any] = {
         "attempt": number,
         "stage": stage,
         "passed": passed,
         "output": output[-2000:],
     }
+    if provider is not None:
+        data["provider"] = provider.name
+        data["model"] = provider.model
+    return data
 
 
 def _feedback(stage: str, output: str) -> str:
@@ -133,6 +148,19 @@ def _write_record(record_path: Path, record: dict[str, Any]) -> None:
         raise RunnerError(f"cannot write the run record {record_path}: {exc}") from exc
 
 
+def _budget_summary(policy: BudgetPolicy | None) -> dict[str, Any] | None:
+    if policy is None:
+        return None
+    budget = policy.budget
+    return {
+        "project": budget.project,
+        "cap_usd": round(budget.cap_usd, 8),
+        "spent_usd": round(budget.spent_usd, 8),
+        "remaining_usd": round(budget.remaining_usd, 8),
+        "ledger": str(budget.ledger_path),
+    }
+
+
 def _validate_expected_files(
     expected: set[str], output: BuilderOutput
 ) -> None:
@@ -156,79 +184,155 @@ def _validate_expected_files(
 def _run_build_step(
     *,
     task_text: str,
-    provider: ConfiguredProvider,
+    providers: list[ConfiguredProvider],
     prompt: str,
-    max_attempts: int,
+    attempts_per_provider: int,
+    max_total_attempts: int,
     temperature: float,
     workspace: Path,
     commit_message: str,
+    budget_policy: BudgetPolicy | None = None,
+    run_id: str = "",
+    subtask: str | None = None,
     expected_files: set[str] | None = None,
     test_paths: list[str] | None = None,
     lint_paths: list[str] | None = None,
 ) -> BuildStepResult:
+    if not providers:
+        raise RunnerError("no provider is available for this step")
     attempts: list[dict[str, Any]] = []
     written: list[Path] = []
     feedback: str | None = None
+    total_attempts = 0
+    last_provider: ConfiguredProvider | None = None
 
-    for attempt_number in range(1, max_attempts + 1):
-        print(
-            f"Attempt {attempt_number}/{max_attempts}: "
-            f"{provider.name} ({provider.model})"
-        )
-        try:
-            output = build_files(
-                task_text,
-                provider,
-                prompt=prompt,
-                feedback=feedback,
-                temperature=temperature,
+    for provider in providers:
+        last_provider = provider
+        for _ in range(1, attempts_per_provider + 1):
+            if total_attempts >= max_total_attempts:
+                break
+            total_attempts += 1
+            print(
+                f"Attempt {total_attempts}/{max_total_attempts}: "
+                f"{provider.name} ({provider.model})"
             )
-            if expected_files is not None:
-                _validate_expected_files(expected_files, output)
-        except BuilderError as exc:
-            detail = str(exc)
-            attempts.append(_attempt(attempt_number, "builder", False, detail))
-            feedback = _feedback("builder", detail)
-            print(f"Attempt {attempt_number} failed at builder: {detail}")
-            continue
-
-        for path in written:
+            extra: dict[str, Any] = {}
+            if budget_policy is not None:
+                extra = {
+                    "budget_policy": budget_policy,
+                    "subtask": subtask,
+                    "attempt": total_attempts,
+                    "run_id": run_id,
+                }
             try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-        try:
-            written = write_files(
-                workspace,
-                [(file.path, file.content) for file in output.files],
+                output = build_files(
+                    task_text,
+                    provider,
+                    prompt=prompt,
+                    feedback=feedback,
+                    temperature=temperature,
+                    **extra,
+                )
+                if expected_files is not None:
+                    _validate_expected_files(expected_files, output)
+            except BudgetExceededError as exc:
+                attempts.append(
+                    _attempt(
+                        total_attempts,
+                        "budget",
+                        False,
+                        str(exc),
+                        provider=provider,
+                    )
+                )
+                return BuildStepResult(
+                    False,
+                    attempts,
+                    written,
+                    paused=True,
+                    provider=provider,
+                    budget_error=exc,
+                )
+            except BudgetError as exc:
+                raise RunnerError(f"budget configuration error: {exc}") from exc
+            except BuilderError as exc:
+                detail = str(exc)
+                attempts.append(
+                    _attempt(
+                        total_attempts,
+                        "builder",
+                        False,
+                        detail,
+                        provider=provider,
+                    )
+                )
+                feedback = _feedback("builder", detail)
+                print(
+                    f"Attempt {total_attempts} failed at builder: {detail}"
+                )
+                continue
+
+            for path in written:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+            try:
+                written = write_files(
+                    workspace,
+                    [(file.path, file.content) for file in output.files],
+                )
+            except (OSError, ValueError) as exc:
+                written = []
+                detail = str(exc)
+                attempts.append(
+                    _attempt(
+                        total_attempts,
+                        "write",
+                        False,
+                        detail,
+                        provider=provider,
+                    )
+                )
+                feedback = _feedback("write", detail)
+                print(f"Attempt {total_attempts} failed at write: {detail}")
+                continue
+
+            result = run_checks(workspace, test_paths, lint_paths)
+            attempts.append(
+                _attempt(
+                    total_attempts,
+                    result.stage,
+                    result.passed,
+                    result.output,
+                    provider=provider,
+                )
             )
-        except (OSError, ValueError) as exc:
-            written = []
-            detail = str(exc)
-            attempts.append(_attempt(attempt_number, "write", False, detail))
-            feedback = _feedback("write", detail)
-            print(f"Attempt {attempt_number} failed at write: {detail}")
-            continue
+            if result.passed:
+                try:
+                    commit_step(workspace, commit_message)
+                except (OSError, subprocess.CalledProcessError) as exc:
+                    raise RunnerError(
+                        f"checks passed but the workspace commit failed: {exc}"
+                    ) from exc
+                print(
+                    f"Attempt {total_attempts} passed; committed the workspace."
+                )
+                return BuildStepResult(
+                    True, attempts, written, provider=provider
+                )
 
-        result = run_checks(workspace, test_paths, lint_paths)
-        attempts.append(
-            _attempt(attempt_number, result.stage, result.passed, result.output)
-        )
-        if result.passed:
-            try:
-                commit_step(workspace, commit_message)
-            except (OSError, subprocess.CalledProcessError) as exc:
-                raise RunnerError(
-                    f"checks passed but the workspace commit failed: {exc}"
-                ) from exc
-            print(f"Attempt {attempt_number} passed; committed the workspace.")
-            return BuildStepResult(True, attempts, written)
+            feedback = _feedback(result.stage, result.output)
+            print(f"Attempt {total_attempts} failed at {result.stage}.")
+            print(result.output)
 
-        feedback = _feedback(result.stage, result.output)
-        print(f"Attempt {attempt_number} failed at {result.stage}.")
-        print(result.output)
+        if total_attempts >= max_total_attempts:
+            break
+        print(f"Escalating from {provider.name}.")
 
-    return BuildStepResult(False, attempts, written)
+    return BuildStepResult(
+        False, attempts, written, provider=last_provider
+    )
 
 
 def _run_direct(
@@ -239,11 +343,15 @@ def _run_direct(
     workspace_root: Path,
     traces_dir: Path,
     loaded: LoadedSettings,
+    project: str,
+    budget_policy: BudgetPolicy | None,
 ) -> RunResult:
     if not tests_dir.is_dir():
         raise RunnerError(f"grading tests directory does not exist: {tests_dir}")
     if not any(tests_dir.rglob("test_*.py")):
-        raise RunnerError(f"grading tests directory has no test_*.py files: {tests_dir}")
+        raise RunnerError(
+            f"grading tests directory has no test_*.py files: {tests_dir}"
+        )
 
     provider = select_builder_provider(loaded)
     try:
@@ -259,18 +367,25 @@ def _run_direct(
 
     step = _run_build_step(
         task_text=task,
-        provider=provider,
+        providers=[provider],
         prompt=prompt,
-        max_attempts=loaded.builder.max_attempts,
+        attempts_per_provider=loaded.builder.max_attempts,
+        max_total_attempts=loaded.builder.max_attempts,
         temperature=loaded.builder.temperature,
         workspace=workspace,
         commit_message=f"Pass task: {_task_title(task)}",
+        budget_policy=budget_policy,
+        run_id=run_id,
     )
-    status: Literal["passed", "failed"] = "passed" if step.passed else "failed"
+    if step.paused:
+        status: Literal["passed", "failed", "paused"] = "paused"
+    else:
+        status = "passed" if step.passed else "failed"
 
     record: dict[str, Any] = {
         "run_id": run_id,
         "mode": "direct",
+        "project": project,
         "task_source": task_source,
         "task": task,
         "workspace": str(workspace),
@@ -280,15 +395,21 @@ def _run_direct(
             "max_attempts": loaded.builder.max_attempts,
             "temperature": loaded.builder.temperature,
         },
+        "budget": _budget_summary(budget_policy),
         "status": status,
         "started_at": started_at.isoformat(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "attempts": step.attempts,
     }
+    if step.budget_error is not None:
+        record["budget_error"] = str(step.budget_error)
     _write_record(record_path, record)
 
     if status == "passed":
         print(f"Run passed after {len(step.attempts)} attempt(s).")
+    elif status == "paused":
+        print(f"Run paused: {step.budget_error}")
+        print(f"Workspace preserved at {workspace}.")
     else:
         print(
             f"Run failed after {len(step.attempts)} attempt(s). "
@@ -335,9 +456,19 @@ def _run_architect(
     workspace_root: Path,
     traces_dir: Path,
     loaded: LoadedSettings,
+    project: str,
+    budget_policy: BudgetPolicy | None,
+    use_router: bool,
 ) -> RunResult:
     architect_provider = select_architect_provider(loaded)
-    builder_provider = select_builder_provider(loaded)
+    builder_provider: ConfiguredProvider | None = None
+    if use_router:
+        try:
+            builder_provider = select_builder_provider(loaded)
+        except RunnerError:
+            builder_provider = None
+    else:
+        builder_provider = select_builder_provider(loaded)
     try:
         architect_prompt = load_architect_prompt()
         brief = load_project_brief()
@@ -345,29 +476,70 @@ def _run_architect(
     except (ArchitectError, BuilderError) as exc:
         raise RunnerError(str(exc)) from exc
 
+    run_id = _new_run_id()
+    workspace = workspace_root / run_id
+    traces_dir.mkdir(parents=True, exist_ok=True)
+    record_path = traces_dir / f"{run_id}.json"
+    started_at = datetime.now(timezone.utc)
+
     try:
+        plan_extra: dict[str, Any] = {}
+        if budget_policy is not None:
+            plan_extra = {"budget_policy": budget_policy, "run_id": run_id}
         plan = plan_task(
             task,
             architect_provider,
             prompt=architect_prompt,
             brief=brief,
             temperature=loaded.architect.temperature,
+            **plan_extra,
         )
+    except BudgetExceededError as exc:
+        record: dict[str, Any] = {
+            "run_id": run_id,
+            "mode": "architect",
+            "project": project,
+            "task_source": task_source,
+            "task": task,
+            "workspace": str(workspace),
+            "workspace_created": False,
+            "architect": {
+                "provider": architect_provider.name,
+                "model": architect_provider.model,
+                "temperature": loaded.architect.temperature,
+            },
+            "budget": _budget_summary(budget_policy),
+            "budget_error": str(exc),
+            "status": "paused",
+            "started_at": started_at.isoformat(),
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "total_attempts": 0,
+            "subtasks": [],
+            "final_checks": None,
+        }
+        _write_record(record_path, record)
+        print(f"Run paused before workspace creation: {exc}")
+        print(f"Run record: {record_path}")
+        return RunResult(
+            status="paused",
+            workspace=workspace,
+            attempts=0,
+            record_path=record_path,
+        )
+    except BudgetError as exc:
+        raise RunnerError(str(exc)) from exc
     except ArchitectError as exc:
         raise RunnerError(f"architect failed: {exc}") from exc
 
     ordered = plan.ordered_subtasks()
     test_contents = {test_file.path: test_file.content for test_file in plan.test_files}
 
-    run_id = _new_run_id()
     workspace = _prepare_workspace(workspace_root, run_id, None)
-    traces_dir.mkdir(parents=True, exist_ok=True)
-    record_path = traces_dir / f"{run_id}.json"
-    started_at = datetime.now(timezone.utc)
     subtask_records: list[dict[str, Any]] = []
     total_attempts = 0
     final_checks: dict[str, Any] | None = None
-    status: Literal["passed", "failed"] = "failed"
+    status: Literal["passed", "failed", "paused"] = "failed"
+    budget_error: BudgetExceededError | None = None
 
     for subtask in ordered:
         print(f"Subtask {subtask.id}: {subtask.title}")
@@ -382,14 +554,40 @@ def _run_architect(
                 f"cannot write grading tests for subtask {subtask.id}: {exc}"
             ) from exc
 
+        if use_router:
+            budget_available = (
+                budget_policy is None
+                or budget_policy.budget.remaining_usd > 0
+            )
+            try:
+                providers = route_candidates(
+                    loaded, subtask, budget_available=budget_available
+                )
+            except RoutingError as exc:
+                raise RunnerError(str(exc)) from exc
+            attempts_per_provider = loaded.router.attempts_per_provider
+            max_total_attempts = loaded.router.max_total_attempts
+        else:
+            if builder_provider is None:
+                raise RunnerError(
+                    "no builder provider is configured in registry.json"
+                )
+            providers = [builder_provider]
+            attempts_per_provider = loaded.builder.max_attempts
+            max_total_attempts = loaded.builder.max_attempts
+
         step = _run_build_step(
             task_text=_subtask_prompt(task, subtask),
-            provider=builder_provider,
+            providers=providers,
             prompt=builder_prompt,
-            max_attempts=loaded.builder.max_attempts,
+            attempts_per_provider=attempts_per_provider,
+            max_total_attempts=max_total_attempts,
             temperature=loaded.builder.temperature,
             workspace=workspace,
             commit_message=f"Pass {subtask.id}: {subtask.title}",
+            budget_policy=budget_policy,
+            run_id=run_id,
+            subtask=subtask.id,
             expected_files=set(subtask.files),
             test_paths=subtask.tests,
             lint_paths=subtask.files,
@@ -399,12 +597,20 @@ def _run_architect(
             {
                 "id": subtask.id,
                 "title": subtask.title,
-                "status": "passed" if step.passed else "failed",
+                "status": (
+                    "paused"
+                    if step.paused
+                    else "passed" if step.passed else "failed"
+                ),
                 "files": subtask.files,
                 "tests": subtask.tests,
                 "attempts": step.attempts,
             }
         )
+        if step.paused:
+            status = "paused"
+            budget_error = step.budget_error
+            break
         if not step.passed:
             break
 
@@ -428,9 +634,10 @@ def _run_architect(
             print(f"Final full test suite failed at {final.stage}.")
             print(final.output)
 
-    record: dict[str, Any] = {
+    record = {
         "run_id": run_id,
         "mode": "architect",
+        "project": project,
         "task_source": task_source,
         "task": task,
         "workspace": str(workspace),
@@ -439,12 +646,25 @@ def _run_architect(
             "model": architect_provider.model,
             "temperature": loaded.architect.temperature,
         },
-        "builder": {
-            "provider": builder_provider.name,
-            "model": builder_provider.model,
-            "max_attempts": loaded.builder.max_attempts,
-            "temperature": loaded.builder.temperature,
-        },
+        "builder": (
+            {
+                "provider": builder_provider.name,
+                "model": builder_provider.model,
+                "max_attempts": loaded.builder.max_attempts,
+                "temperature": loaded.builder.temperature,
+            }
+            if builder_provider is not None
+            else None
+        ),
+        "router": (
+            {
+                "attempts_per_provider": loaded.router.attempts_per_provider,
+                "max_total_attempts": loaded.router.max_total_attempts,
+            }
+            if use_router
+            else None
+        ),
+        "budget": _budget_summary(budget_policy),
         "plan": plan.model_dump(),
         "status": status,
         "started_at": started_at.isoformat(),
@@ -453,6 +673,8 @@ def _run_architect(
         "subtasks": subtask_records,
         "final_checks": final_checks,
     }
+    if budget_error is not None:
+        record["budget_error"] = str(budget_error)
     _write_record(record_path, record)
 
     if status == "passed":
@@ -460,6 +682,9 @@ def _run_architect(
             f"Run passed after {total_attempts} attempt(s) across "
             f"{len(ordered)} subtask(s)."
         )
+    elif status == "paused":
+        print(f"Run paused: {budget_error}")
+        print(f"Workspace preserved at {workspace}.")
     else:
         print(
             f"Run failed after {total_attempts} attempt(s). "
@@ -483,6 +708,9 @@ def run_task(
     workspace_root: Path = Path("workspace"),
     traces_dir: Path = Path("traces"),
     settings: LoadedSettings | None = None,
+    project: str = "default",
+    budget_policy: BudgetPolicy | None = None,
+    use_router: bool = False,
 ) -> RunResult:
     """Run one task directly with pre-supplied tests or via architect planning."""
     loaded = _load_settings(settings)
@@ -494,6 +722,8 @@ def run_task(
             workspace_root=workspace_root,
             traces_dir=traces_dir,
             loaded=loaded,
+            project=project,
+            budget_policy=budget_policy,
         )
     return _run_architect(
         task,
@@ -501,6 +731,9 @@ def run_task(
         workspace_root=workspace_root,
         traces_dir=traces_dir,
         loaded=loaded,
+        project=project,
+        budget_policy=budget_policy,
+        use_router=use_router,
     )
 
 
@@ -508,6 +741,8 @@ def plan_only(
     task: str,
     *,
     settings: LoadedSettings | None = None,
+    budget_policy: BudgetPolicy | None = None,
+    run_id: str = "",
 ) -> Plan:
     """Make one architect call and return the validated plan without executing it."""
     loaded = _load_settings(settings)
@@ -517,6 +752,12 @@ def plan_only(
         brief = load_project_brief()
     except ArchitectError as exc:
         raise RunnerError(str(exc)) from exc
+    extra: dict[str, Any] = {}
+    if budget_policy is not None:
+        extra = {
+            "budget_policy": budget_policy,
+            "run_id": run_id or _new_run_id(),
+        }
     try:
         return plan_task(
             task,
@@ -524,6 +765,11 @@ def plan_only(
             prompt=prompt,
             brief=brief,
             temperature=loaded.architect.temperature,
+            **extra,
         )
+    except BudgetExceededError:
+        raise
+    except BudgetError as exc:
+        raise RunnerError(str(exc)) from exc
     except ArchitectError as exc:
         raise RunnerError(f"architect failed: {exc}") from exc

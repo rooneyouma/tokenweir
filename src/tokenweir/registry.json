@@ -7,31 +7,52 @@
   "architect": {
     "temperature": 0.0
   },
+  "router": {
+    "attempts_per_provider": 2,
+    "max_total_attempts": 6
+  },
+  "budget": {
+    "default_cap_usd": 2.0,
+    "warn_fraction": 0.8,
+    "state_dir": "projects"
+  },
   "providers": [
     {
       "name": "ollama",
       "model_env": "TOKENWEIR_OLLAMA_MODEL",
       "base_url_env": "TOKENWEIR_OLLAMA_BASE_URL",
       "default_base_url": "http://localhost:11434",
-      "timeout_s": 120
+      "timeout_s": 120,
+      "free": true,
+      "tier": "local",
+      "max_output_tokens": 4096
     },
     {
       "name": "deepseek",
       "model_env": "TOKENWEIR_DEEPSEEK_MODEL",
       "api_key_env": "DEEPSEEK_API_KEY",
-      "timeout_s": 90
+      "timeout_s": 90,
+      "free": false,
+      "tier": "paid",
+      "max_output_tokens": 4096
     },
     {
       "name": "gemini",
       "model_env": "TOKENWEIR_GEMINI_MODEL",
       "api_key_env": "GEMINI_API_KEY",
-      "timeout_s": 60
+      "timeout_s": 60,
+      "free": true,
+      "tier": "free_cloud",
+      "max_output_tokens": 4096
     },
     {
       "name": "groq",
       "model_env": "TOKENWEIR_GROQ_MODEL",
       "api_key_env": "GROQ_API_KEY",
-      "timeout_s": 60
+      "timeout_s": 60,
+      "free": true,
+      "tier": "free_cloud",
+      "max_output_tokens": 4096
     }
   ]
 }

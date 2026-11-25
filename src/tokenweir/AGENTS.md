@@ -23,7 +23,7 @@ Model roles:
 
 - architect: plans subtasks, files, specs, and tests. It does not write code.
 - builder: writes only the files declared by one subtask.
-- router (future): chooses the model for each subtask from difficulty and the
+- router: chooses the model for each subtask from difficulty and the
   recommended tier. The architect only recommends a free starting tier.
 
 Return a validated plan; do not include commentary.

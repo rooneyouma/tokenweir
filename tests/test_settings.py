@@ -274,3 +274,101 @@ def test_load_settings_rejects_unknown_architect_provider(
 
     with pytest.raises(SettingsError, match="architect provider"):
         load_settings(registry, environ={"LOCAL_MODEL": "local/model"})
+
+
+def test_load_settings_applies_router_and_budget_config(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "router": {
+                    "attempts_per_provider": 1,
+                    "max_total_attempts": 4,
+                },
+                "budget": {
+                    "default_cap_usd": 5.0,
+                    "warn_fraction": 0.5,
+                    "state_dir": "state",
+                },
+                "providers": [
+                    {"name": "local", "model_env": "LOCAL_MODEL"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(
+        registry, environ={"LOCAL_MODEL": "local/model"}
+    )
+
+    assert settings.router.attempts_per_provider == 1
+    assert settings.router.max_total_attempts == 4
+    assert settings.budget.default_cap_usd == 5.0
+    assert settings.budget.warn_fraction == 0.5
+    assert settings.budget.state_dir == "state"
+
+
+def test_load_settings_accepts_provider_tiers_and_costs(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "providers": [
+                    {
+                        "name": "paid",
+                        "model_env": "PAID_MODEL",
+                        "api_key_env": "PAID_KEY",
+                        "tier": "paid",
+                        "free": False,
+                        "max_output_tokens": 1024,
+                        "input_cost_per_million": 1.0,
+                        "output_cost_per_million": 2.0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(
+        registry,
+        environ={
+            "PAID_MODEL": "paid/model",
+            "PAID_KEY": "secret-value",
+        },
+    )
+
+    provider = settings.providers[0]
+    assert provider.tier == "paid"
+    assert provider.free is False
+    assert provider.max_output_tokens == 1024
+    assert provider.input_cost_per_million == 1.0
+    assert provider.output_cost_per_million == 2.0
+
+
+def test_load_settings_rejects_partial_provider_costs(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "providers": [
+                    {
+                        "name": "paid",
+                        "model_env": "PAID_MODEL",
+                        "input_cost_per_million": 1.0,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SettingsError, match="set both"):
+        load_settings(registry, environ={"PAID_MODEL": "paid/model"})

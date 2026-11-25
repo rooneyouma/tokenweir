@@ -2,9 +2,12 @@
 
 TokenWeir is a budget-aware, test-driven coding-agent orchestration project.
 The current implementation runs one task in a disposable workspace using one
-architect planning call and one configured builder model. It validates the
-plan and returned files, runs pytest, flake8, and mypy, and commits each passing
-subtask. Model routing, budget enforcement, and resume are not implemented yet.
+architect planning call and a configured builder. In architect mode a
+deterministic router chooses providers for each subtask. It validates the plan
+and returned files, runs pytest, flake8, and mypy, and commits each passing
+subtask. Every model call is recorded in a per-project ledger, and paid calls
+are checked against a project cap before they run. Automatic resume is not
+implemented yet.
 
 ## Setup
 
@@ -25,9 +28,9 @@ TokenWeir supports two modes:
   `tests/` directory next to the task file. The builder implements the whole
   task in one bounded retry loop.
 - **Architect mode** runs when no grading tests are supplied. The architect
-  plans once, writes complete pytest files, and the builder implements each
-  subtask in dependency order. Each passing subtask is committed, then a final
-  full-suite check runs.
+  plans once, writes complete pytest files, and the router chooses a provider
+  for each subtask in dependency order. Each passing subtask is committed, then
+  a final full-suite check runs.
 
 ```bash
 # Direct mode with supplied tests
@@ -37,6 +40,10 @@ uv run tokenweir --task "Create palindrome.py" --tests bench/tasks/palindrome/te
 
 # Architect mode: plan, write tests, and build subtasks
 uv run tokenweir --task "Create greet.py with greet(name: str) -> str"
+
+# Set a project cap before running
+uv run tokenweir --task "Create greet.py with greet(name: str) -> str" \
+  --project greet --cap 1.50
 
 # Inspect the validated plan without creating a workspace
 uv run tokenweir --task "Create greet.py with greet(name: str) -> str" --plan-only
@@ -56,19 +63,46 @@ test paths must be under `tests/` and named `test_*.py`.
 
 Run records are written to `traces/<run-id>.json` without credentials. Direct
 records contain the builder attempts; architect records also contain the plan,
-per-subtask attempts, and the final full-suite check.
+per-subtask attempts, the chosen router configuration, and the final full-suite
+check. Both include a budget summary and no API keys.
+
+Paid calls are checked before they run. When a paid call would exceed the
+project cap, free/local providers remain available. In an interactive terminal
+TokenWeir asks for a new cap and continues if one is supplied. In a
+non-interactive run it pauses, preserves the workspace and trace, and exits with
+code `3`; rerun with `--cap USD` to extend the project. Automatic resume from a
+paused workspace is not implemented yet.
 
 Exit codes: `0` passed, `1` failed after the retry limit, `2` invalid input or
-configuration.
+configuration, `3` paused because the project budget is exhausted.
 
 ## Configuration
 
 `src/tokenweir/registry.json` selects the builder provider
-(`builder.provider`, default `ollama`), the retry limit
+(`builder.provider`, default `ollama`), the direct-mode retry limit
 (`builder.max_attempts`, 1-8), and builder temperature. The architect provider
 (`architect.provider`) defaults to the builder provider; `architect.temperature`
-defaults to `0.0`. Set the selected provider's model ID and credentials in
-`.env`:
+defaults to `0.0`.
+
+Router settings apply in architect mode. `router.attempts_per_provider` bounds
+attempts on one provider and `router.max_total_attempts` bounds attempts across
+providers for a subtask. Candidates are ordered deterministically from
+`local`, `free_cloud`, and `paid` providers based on the subtask difficulty and
+the architect's `recommended_tier`; paid providers are excluded when the project
+cap is exhausted. Pass `--no-router` to use only `builder.provider` in architect
+mode.
+
+Budget settings are `budget.default_cap_usd`, `budget.warn_fraction`, and
+`budget.state_dir`. Each project gets `budget.json` and `ledger.jsonl` under
+`<state_dir>/<project-slug>/`; `--project` selects the group and `--cap` sets or
+replaces its cap. `--state-dir` overrides the registry's state directory. The
+ledger records timestamp, project, run, role, provider, model, task/subtask,
+attempt, tokens, estimated cost, and whether the call was free.
+
+Provider definitions may set `free`, `tier` (`local`, `free_cloud`, or `paid`),
+`max_output_tokens`, and optional `input_cost_per_million` /
+`output_cost_per_million` values. Set the selected provider's model ID and
+credentials in `.env`:
 
 ```bash
 TOKENWEIR_OLLAMA_MODEL=ollama_chat/qwen2.5-coder:1.5b
@@ -77,11 +111,10 @@ TOKENWEIR_DEEPSEEK_MODEL=...
 DEEPSEEK_API_KEY=...
 ```
 
-The CLI does not choose or override models; the registry is the source of
-truth. The architect's `recommended_tier` is validated but is not used for
-routing yet. This phase has no router, ledger, or budget cap, so use free/local
-providers or accept the cost of the configured architect and builder. Small
-local models can produce valid plans but still fail a subtask; choose a
+The CLI does not choose or override models; the registry and router are the
+source of truth. Per-provider request/token quotas and automatic resume are not
+implemented yet. Small local models can produce valid plans but still fail a
+subtask; the router escalates within the configured bounds, and you can choose a
 stronger configured model if that happens.
 
 ## Provider health checks
